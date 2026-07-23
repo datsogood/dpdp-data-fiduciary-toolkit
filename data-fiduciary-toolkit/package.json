@@ -1,0 +1,15 @@
+{
+  "name": "dpdp-fiduciary-toolkit",
+  "version": "0.1.0",
+  "description": "Reference implementation of DPDP Act 2023 data-fiduciary obligations: consent capture, withdrawal, data principal rights, grievance redressal, and consent manager handoff.",
+  "main": "src/index.js",
+  "license": "MIT",
+  "scripts": {
+    "example": "node examples/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "mongoose": "^8.5.0",
+    "dotenv": "^16.4.5"
+  }
+}

@@ -1,0 +1,18 @@
+const { mongoose } = require("../db/connection");
+const { Schema } = mongoose;
+
+const grievanceSchema = new Schema({
+  principalId: { type: String, required: true, index: true },
+  refId: { type: String, required: true, unique: true },
+  subject: { type: String, required: true },
+  description: { type: String, required: true },
+  addressedTo: { type: String, required: true }, // the fiduciary's Grievance Officer, per Section 13
+  status: { type: String, enum: ["open", "in_progress", "resolved", "escalated"], default: "open" },
+  slaDueAt: { type: Date, required: true },
+  escalatedToBoard: { type: Boolean, default: false },
+  escalatedAt: Date,
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+});
+
+module.exports = mongoose.models.Grievance || mongoose.model("Grievance", grievanceSchema);
