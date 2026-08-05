@@ -22,8 +22,8 @@ The following is a summary of all the responsibilities of a data fiduciary (the 
 13. A signficant data fiduciary is one that has a huge public impact on the nature of the personal data that they're collecting. They should appoint a DPO and an independent data auditor. Periodic data protection impact assessment and audit needs to be performed.
 
 
-Five service functions, each usable directly or via a pre-wired Express
-router.
+We're in the process of creating APIs that encapsulate the obligations above so that each data fiduciary can adhere to the DPDP act completely and with ease.
+
 
 ## Setup
 
