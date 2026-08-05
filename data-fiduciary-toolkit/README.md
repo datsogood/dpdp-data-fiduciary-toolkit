@@ -1,9 +1,26 @@
 # dpdp-fiduciary-toolkit
 
 A reference implementation of a data fiduciary's obligations under India's
-Digital Personal Data Protection Act, 2023 (DPDP Act): capturing consent,
+Digital Personal Data Protection Act, 2025 (DPDP Act): capturing consent,
 honouring withdrawal, letting a data principal exercise their rights, routing
 grievances, and handing off to a Consent Manager.
+
+The following is a summary of all the responsibilities of a data fiduciary (the organization collecting PII data) towards a data principal (the user) that we intend to codify as part of this toolkit - 
+
+1. Consent needs to provided clearly to the Data Principal - across all languages.
+2. Information to be provided to the Data Principal on the personal data collected, purpose for collection and how data will be processed.
+3. Information to be provided to the Data Principal on how consent can be revoked, their rights can be exercised and complaints to the board can be raise.
+4. Ease of consent withdrawal by a Data Principal should be the same as accepting consent.
+5. Data Fiduciary shall ask data processors to cease processing the data principal's PII data, within reasonable time on consent revocation.
+6. Data Principal may engage with a designated consent manager to liaise with a Data Fiduciary.
+7. Audit trail of the consent should be available at any point in time.
+8. Technical and organizational measures to ensure effective adherence of the policies
+9. Data breaches to be intimated on time and mitigated promptly with established SLAs.
+10. Prior collected personal data needs to be erased on revocation of consent. Data processor (3rd party data processing entity, if any) should also be intimated on the erasure of data.
+11. Data Protection Officer contact should be provided and be valid at all times.
+12. Consent from parents are required when personal data is collected, concerning children.
+13. A signficant data fiduciary is one that has a huge public impact on the nature of the personal data that they're collecting. They should appoint a DPO and an independent data auditor. Periodic data protection impact assessment and audit needs to be performed.
+
 
 Five service functions, each usable directly or via a pre-wired Express
 router.
