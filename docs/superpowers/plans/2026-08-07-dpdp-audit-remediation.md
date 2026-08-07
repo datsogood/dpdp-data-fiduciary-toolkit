@@ -939,7 +939,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
 const {
   newPrincipalId, lookupHash, findOrCreatePrincipal, findPrincipalByContact, updatePrincipalContact,
@@ -1340,7 +1340,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
 const { findOrCreatePrincipal } = require("../src/utils/principalId");
 const { erasePrincipalPII } = require("../src/services/erasure");
@@ -1464,7 +1464,7 @@ const assert = require("node:assert/strict");
 const express = require("express");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
 const createRouter = require("../src/http/router");
 
@@ -2156,7 +2156,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
 const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
 const withdrawConsent = require("../src/services/withdrawConsent");
@@ -2309,7 +2309,14 @@ const { AppError } = require("../utils/errors");
  * @param {object}   [input.notice]       - Section 5 notice snapshot (Task 8)
  */
 async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice } = {}) {
-  const consentSubmitted = consentTypes !== undefined;
+  // Omission means "no consent decision was made"; an empty ARRAY means "I
+  // decline everything". null must count as omission, not as a decline:
+  // assertStringArray maps both undefined and null to [], so treating null as a
+  // submission would walk the granted-plus-absent row for every live purpose and
+  // withdraw the lot. A client that serialises an absent value as null rather
+  // than dropping the key would silently revoke every optional consent, and the
+  // ledger is append-only so it could never be undone.
+  const consentSubmitted = consentTypes !== undefined && consentTypes !== null;
   const chosen = assertStringArray(consentTypes, "consentTypes");
 
   const unknown = chosen.filter((t) => !getValidConsentTypes().includes(t));
@@ -2343,6 +2350,10 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
 
   if (newEvents.length) {
     record.events.push(...newEvents);
+  }
+  // Move updatedAt for a notice-only change too - refreshing the snapshot is a
+  // modification of the record even when no consent state changed.
+  if (newEvents.length || notice) {
     record.updatedAt = now;
   }
   if (notice) record.lastNotice = notice;
@@ -2408,12 +2419,19 @@ async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal
   const now = new Date();
   const receiptId = generateDocRef("RC");
   const state = record.currentState();
+
+  // Deduplicate. ["marketing", "marketing"] would otherwise append two
+  // withdrawn events for one purpose, and the ledger is append-only, so a
+  // duplicate can never be cleaned up afterwards.
+  const requested = [...new Set(types)];
   const withdrawn = [];
   const rejected = [];
   const noChange = [];
 
-  for (const type of types) {
+  for (const type of requested) {
     if (!getValidConsentTypes().includes(type)) {
+      // Must come before getCatalogEntry below - an unknown type has no entry,
+      // and dereferencing its lawfulBasis would 500 on attacker input.
       rejected.push({ type, reason: "Unknown consent type" });
       continue;
     }
@@ -2449,7 +2467,17 @@ async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal
     }
   }
 
-  return { docRef: record.docRef, receiptId, withdrawn, rejected, noChange, effectiveFrom: now };
+  // effectiveFrom only when something actually changed. Returning a timestamp
+  // for a no-op withdrawal reports a revocation that did not happen, and a host
+  // keying off it would act on nothing.
+  return {
+    docRef: record.docRef,
+    receiptId,
+    withdrawn,
+    rejected,
+    noChange,
+    effectiveFrom: withdrawn.length ? now : null,
+  };
 }
 
 module.exports = withdrawConsent;
@@ -2558,7 +2586,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
 const { buildNotice, SUPPORTED_NOTICE_LANGUAGES } = require("../src/config/notice");
 const { buildModels } = require("../src/models");
@@ -2811,7 +2839,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
 const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
 const { ageInYears } = require("../src/utils/age");
@@ -2998,7 +3026,7 @@ const assert = require("node:assert/strict");
 const express = require("express");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
 const { buildModels } = require("../src/models");
 const createRouter = require("../src/http/router");
@@ -3168,7 +3196,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
 const { advanceRightsRequest, advanceGrievance } = require("../src/services/requestLifecycle");
 const { escalateToBoard } = require("../src/services/complaintToTheBoard");
@@ -3380,7 +3408,7 @@ const assert = require("node:assert/strict");
 const express = require("express");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
 
 const { buildModels } = require("../src/models");
@@ -3656,7 +3684,7 @@ const assert = require("node:assert/strict");
 const express = require("express");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
 const { buildModels } = require("../src/models");
 const createRouter = require("../src/http/router");
@@ -3874,7 +3902,7 @@ Guards the public API against silent drift and asserts the README's documented e
 ```js
 const test = require("node:test");
 const assert = require("node:assert/strict");
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const toolkit = require("../src/index");
 
 test("the documented public API is all exported", () => {
