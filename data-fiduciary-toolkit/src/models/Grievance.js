@@ -1,5 +1,4 @@
-const { mongoose } = require("../db/connection");
-const { Schema } = mongoose;
+const { Schema } = require("mongoose");
 
 const grievanceSchema = new Schema({
   principalId: { type: String, required: true, index: true },
@@ -15,4 +14,7 @@ const grievanceSchema = new Schema({
   updatedAt: { type: Date, default: Date.now },
 });
 
-module.exports = mongoose.models.Grievance || mongoose.model("Grievance", grievanceSchema);
+module.exports = {
+  schema: grievanceSchema,
+  build: (connection) => connection.model("Grievance", grievanceSchema),
+};

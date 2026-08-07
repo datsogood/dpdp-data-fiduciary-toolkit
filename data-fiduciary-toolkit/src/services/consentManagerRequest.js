@@ -1,4 +1,3 @@
-const ConsentManagerRequest = require("../models/ConsentManagerRequest");
 const { generateDocRef } = require("../utils/principalId");
 
 /**
@@ -9,16 +8,17 @@ const { generateDocRef } = require("../utils/principalId");
  * as a Consent Manager.
  *
  * @param {object} input
+ * @param {object} input.models - model registry, must include ConsentManagerRequest
  * @param {string} input.principalId
  * @param {string} input.message
  * @param {string} [input.preferredConsentManager]
  * @returns {Promise<{ refId, status }>}
  */
-async function consentManagerRequest({ principalId, message, preferredConsentManager = "" } = {}) {
+async function consentManagerRequest({ models, principalId, message, preferredConsentManager = "" } = {}) {
   if (!principalId) throw new Error("principalId is required");
   if (!message) throw new Error("message is required");
 
-  const request = await ConsentManagerRequest.create({
+  const request = await models.ConsentManagerRequest.create({
     principalId,
     refId: generateDocRef("CM"),
     message,

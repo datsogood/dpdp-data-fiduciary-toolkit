@@ -1,4 +1,3 @@
-const ConsentRecord = require("../models/ConsentRecord");
 const { CONSENT_CATALOG, VALID_CONSENT_TYPES, REQUIRED_CONSENT_TYPES } = require("../config/catalog");
 const { derivePrincipalId, generateDocRef } = require("../utils/principalId");
 
@@ -10,11 +9,12 @@ const { derivePrincipalId, generateDocRef } = require("../utils/principalId");
  * is still owed notice of them.
  *
  * @param {object} input
+ * @param {object} input.models - model registry, must include ConsentRecord
  * @param {object} input.pii - { name, email, phone, dob?, pan?, address? }
  * @param {string[]} input.consentTypes - optional purposes the principal agreed to (e.g. ['marketing'])
  * @returns {Promise<{ docRef: string, principalId: string, events: object[] }>}
  */
-async function persistPIIwithconsent({ pii, consentTypes = [] } = {}) {
+async function persistPIIwithconsent({ models, pii, consentTypes = [], regrant } = {}) {
   if (!pii || !pii.name || !pii.email || !pii.phone) {
     throw new Error("pii.name, pii.email, and pii.phone are required");
   }
@@ -36,7 +36,7 @@ async function persistPIIwithconsent({ pii, consentTypes = [] } = {}) {
     timestamp: now,
   }));
 
-  let record = await ConsentRecord.findOne({ principalId });
+  let record = await models.ConsentRecord.findOne({ principalId });
 
   if (record) {
     // Returning principal confirming choices again — append new events,
@@ -46,7 +46,7 @@ async function persistPIIwithconsent({ pii, consentTypes = [] } = {}) {
     record.updatedAt = now;
     await record.save();
   } else {
-    record = await ConsentRecord.create({
+    record = await models.ConsentRecord.create({
       principalId,
       docRef: generateDocRef("CN"),
       pii,

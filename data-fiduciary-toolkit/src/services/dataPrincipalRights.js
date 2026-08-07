@@ -1,4 +1,3 @@
-const RightsRequest = require("../models/RightsRequest");
 const { RIGHTS_CATALOG } = require("../config/catalog");
 const { generateDocRef } = require("../utils/principalId");
 
@@ -14,12 +13,13 @@ function listRights() {
  * own SLA and escalation path.
  *
  * @param {object} input
+ * @param {object} input.models - model registry, must include RightsRequest
  * @param {string} input.principalId
  * @param {string} input.right - one of RIGHTS_CATALOG keys, excluding 'grievance'
  * @param {string} [input.details] - e.g. what field to correct, for 'correction'
  * @returns {Promise<{ refId: string, right: string, status: string }>}
  */
-async function exerciseRight({ principalId, right, details = "" } = {}) {
+async function exerciseRight({ models, principalId, right, details = "" } = {}) {
   if (!principalId) throw new Error("principalId is required");
   const entry = RIGHTS_CATALOG.find((r) => r.key === right);
   if (!entry) throw new Error(`Unknown right: ${right}`);
@@ -27,7 +27,7 @@ async function exerciseRight({ principalId, right, details = "" } = {}) {
     throw new Error("Use complaintToTheBoard to raise a grievance — it carries its own SLA and escalation path");
   }
 
-  const request = await RightsRequest.create({
+  const request = await models.RightsRequest.create({
     principalId,
     refId: generateDocRef("RQ"),
     right,

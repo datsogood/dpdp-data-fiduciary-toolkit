@@ -1,5 +1,4 @@
-const { mongoose } = require("../db/connection");
-const { Schema } = mongoose;
+const { Schema } = require("mongoose");
 
 const rightsRequestSchema = new Schema({
   principalId: { type: String, required: true, index: true },
@@ -11,4 +10,7 @@ const rightsRequestSchema = new Schema({
   updatedAt: { type: Date, default: Date.now },
 });
 
-module.exports = mongoose.models.RightsRequest || mongoose.model("RightsRequest", rightsRequestSchema);
+module.exports = {
+  schema: rightsRequestSchema,
+  build: (connection) => connection.model("RightsRequest", rightsRequestSchema),
+};

@@ -1,4 +1,3 @@
-const Grievance = require("../models/Grievance");
 const { FIDUCIARY } = require("../config/catalog");
 const { generateDocRef } = require("../utils/principalId");
 
@@ -10,19 +9,20 @@ const { generateDocRef } = require("../utils/principalId");
  * to the DPO and sets that SLA; use escalateToBoard() after it lapses.
  *
  * @param {object} input
+ * @param {object} input.models - model registry, must include Grievance
  * @param {string} input.principalId
  * @param {string} input.subject
  * @param {string} input.description
  * @returns {Promise<{ refId, addressedTo, slaDueAt }>}
  */
-async function complaintToTheBoard({ principalId, subject, description } = {}) {
+async function complaintToTheBoard({ models, principalId, subject, description } = {}) {
   if (!principalId) throw new Error("principalId is required");
   if (!subject || !description) throw new Error("subject and description are required");
 
   const now = new Date();
   const slaDueAt = new Date(now.getTime() + FIDUCIARY.grievanceSlaDays * 24 * 60 * 60 * 1000);
 
-  const grievance = await Grievance.create({
+  const grievance = await models.Grievance.create({
     principalId,
     refId: generateDocRef("GR"),
     subject,
@@ -48,9 +48,9 @@ async function complaintToTheBoard({ principalId, subject, description } = {}) {
  * meaningful once the SLA has lapsed without resolution — enforced here
  * rather than left to the caller.
  */
-async function escalateToBoard({ refId } = {}) {
+async function escalateToBoard({ models, refId, principalId } = {}) {
   if (!refId) throw new Error("refId is required");
-  const grievance = await Grievance.findOne({ refId });
+  const grievance = await models.Grievance.findOne({ refId });
   if (!grievance) throw new Error("No grievance found with that reference");
   if (grievance.status === "resolved") throw new Error("This grievance is already marked resolved");
   if (new Date() < grievance.slaDueAt) {

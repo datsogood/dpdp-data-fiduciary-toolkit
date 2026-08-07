@@ -1,13 +1,16 @@
-const { mongoose } = require("../db/connection");
-const { Schema } = mongoose;
+const { Schema } = require("mongoose");
 
-// Every grant AND every withdrawal is its own event, never overwritten —
+// Every grant, decline AND withdrawal is its own event, never overwritten -
 // this is the audit trail DPDP expects a fiduciary to be able to produce.
+// This document holds NO PII: PII lives on Principal so it can be erased
+// without destroying the consent evidence.
 const consentEventSchema = new Schema(
   {
-    type: { type: String, required: true }, // e.g. 'marketing'
-    status: { type: String, enum: ["granted", "withdrawn"], required: true },
-    basis: { type: String, required: true }, // legal basis snapshot at time of event
+    type: { type: String, required: true },
+    status: { type: String, enum: ["granted", "denied", "withdrawn"], required: true },
+    basis: { type: String, required: true },
+    lawfulBasisKind: { type: String, enum: ["consent", "legitimate_use"], required: true },
+    receiptId: { type: String, required: true },
     timestamp: { type: Date, required: true, default: Date.now },
   },
   { _id: false }
@@ -15,15 +18,7 @@ const consentEventSchema = new Schema(
 
 const consentRecordSchema = new Schema({
   principalId: { type: String, required: true, unique: true, index: true },
-  docRef: { type: String, required: true, unique: true }, // consent receipt id
-  pii: {
-    name: { type: String, required: true },
-    email: { type: String, required: true },
-    phone: { type: String, required: true },
-    dob: Date,
-    pan: String,
-    address: String,
-  },
+  docRef: { type: String, required: true, unique: true },
   events: { type: [consentEventSchema], default: [] },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
@@ -39,4 +34,7 @@ consentRecordSchema.methods.currentState = function currentState() {
   return latestByType;
 };
 
-module.exports = mongoose.models.ConsentRecord || mongoose.model("ConsentRecord", consentRecordSchema);
+module.exports = {
+  schema: consentRecordSchema,
+  build: (connection) => connection.model("ConsentRecord", consentRecordSchema),
+};

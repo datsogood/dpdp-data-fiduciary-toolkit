@@ -1,5 +1,4 @@
-const { mongoose } = require("../db/connection");
-const { Schema } = mongoose;
+const { Schema } = require("mongoose");
 
 // Under Section 6(7)-(9), a Consent Manager is a separate, Board-registered
 // entity a data principal can route their consent through. This model
@@ -14,5 +13,7 @@ const consentManagerRequestSchema = new Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
-module.exports =
-  mongoose.models.ConsentManagerRequest || mongoose.model("ConsentManagerRequest", consentManagerRequestSchema);
+module.exports = {
+  schema: consentManagerRequestSchema,
+  build: (connection) => connection.model("ConsentManagerRequest", consentManagerRequestSchema),
+};
