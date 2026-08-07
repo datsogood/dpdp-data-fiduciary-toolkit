@@ -63,8 +63,15 @@ function minorDob() {
 }
 
 test("ageInYears handles the birthday boundary", () => {
-  assert.equal(ageInYears("2008-08-07", new Date("2026-08-06")), 17);
-  assert.equal(ageInYears("2008-08-07", new Date("2026-08-07")), 18);
+  // asOf is built locally, never from an ISO string - see the note on ageInYears.
+  assert.equal(ageInYears("2008-08-07", new Date(2026, 7, 6)), 17);
+  assert.equal(ageInYears("2008-08-07", new Date(2026, 7, 7)), 18);
+});
+
+test("ageInYears handles a leap-year date of birth", () => {
+  assert.equal(ageInYears("2008-02-29", new Date(2026, 1, 28)), 17);
+  assert.equal(ageInYears("2008-02-29", new Date(2026, 2, 1)), 18);
+  assert.equal(ageInYears("2008-02-29", new Date(2028, 1, 29)), 20);
 });
 
 test("date of birth is required - an age gate cannot work without it", async () => {
@@ -129,13 +136,40 @@ Expected: FAIL - no age handling exists.
 - [ ] **Step 4: Write `src/utils/age.js`**
 
 ```js
-/** Whole years between dob and asOf. Returns null for an unparseable date. */
+/**
+ * Whole years between a date of birth and a moment. Returns null for an
+ * unparseable date.
+ *
+ * The two arguments are DIFFERENT KINDS OF THING and must be read differently.
+ * Getting this wrong is not academic - it decides whether a 17-year-old is
+ * processed as an adult.
+ *
+ *   dob  is a CALENDAR DATE. "2008-08-08" parses to UTC midnight (the ISO 8601
+ *        rule the Date constructor follows), and a Date loaded from Mongo for a
+ *        date-only value is UTC midnight too. So UTC getters recover the
+ *        intended calendar date in both cases.
+ *
+ *   asOf is an INSTANT - "now". The civil date that matters is the one the
+ *        deployment is actually living in, so it needs LOCAL getters.
+ *
+ * Reading both with UTC getters looks tidy and is wrong: verified by execution,
+ * it returns 18 at 23:30 on the day BEFORE an 18th birthday in America/New_York
+ * (a child treated as an adult), and 17 at 00:30 ON the birthday in
+ * Asia/Calcutta - misclassifying an adult as a child in the Act's own
+ * jurisdiction. Reading both with local getters is also wrong, and worse: it
+ * moves the recognised birthday a full day earlier for every hour of the
+ * preceding day anywhere behind UTC.
+ *
+ * CALLERS AND TESTS: pass asOf as a locally-constructed Date - new Date(2026, 7, 6)
+ * - never as an ISO string. new Date("2026-08-06") is UTC midnight, which local
+ * getters will shift a day in any negative-offset timezone.
+ */
 function ageInYears(dob, asOf = new Date()) {
   const birth = dob instanceof Date ? dob : new Date(dob);
   if (Number.isNaN(birth.getTime())) return null;
-  let age = asOf.getFullYear() - birth.getFullYear();
-  const monthDiff = asOf.getMonth() - birth.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && asOf.getDate() < birth.getDate())) age -= 1;
+  let age = asOf.getFullYear() - birth.getUTCFullYear();
+  const monthDiff = asOf.getMonth() - birth.getUTCMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && asOf.getDate() < birth.getUTCDate())) age -= 1;
   return age;
 }
 

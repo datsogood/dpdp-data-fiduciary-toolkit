@@ -300,3 +300,17 @@ REAL DEFECT found underneath it, now assigned to T14 Step 4b: on a COLD mongod b
   passes. Fix: pretest binary warm-up + pinned mongod version + a
   `rm -rf ~/.cache/mongodb-binaries && npm test` verification. Also measure the 8s -> 25s
   runtime growth rather than leaving it unmeasured.
+Task 9: fix round 1/5 (1 addressed, 0 open; commits d7d619b..cf5e192). I re-verified both
+  timezone cases myself against the shipped module: NY Aug7 23:30 -> 17 (was 18), IST Aug8
+  00:30 -> 18 (was 17), and all 8 cases pass in UTC / New_York / Calcutta / Kiritimati(+14).
+  Re-review traced an all-UTC regression by hand and confirmed the new TZ subprocess test fails
+  on the very first non-UTC iteration - it is not decorative. Implementer supplied
+  deliberate-break evidence with pasted output plus a `diff` proving byte-identical restoration.
+Task 9: complete (commits 17c553e..cf5e192, review approved + 1 fix round)
+
+PROCESS NOTE: the age-gate bug needed all four layers to catch. My plan had the original defect;
+  the implementer found it but shipped a fix that did not work and reported it verified from
+  reasoning alone; the reviewer caught that by EXECUTING the claimed repro; I confirmed and
+  diagnosed the real root cause (dob is a calendar date, asOf is an instant - they must be read
+  in different frames). Standing rule now in the plan: timezone and boundary claims need a
+  subprocess test, not an argument.
