@@ -15,9 +15,9 @@
 - **License:** `Apache-2.0`. The root `LICENSE` file (Apache 2.0) is authoritative; `package.json` must declare `"license": "Apache-2.0"`.
 - **No secrets in source:** every org-specific value comes from an env var with a documented default. A placeholder default that would be shown to a data principal must fail startup instead.
 - **`principalId` is never read from `req.body` or `req.query` on any route.** It comes only from `resolvePrincipal(req)`. Services still accept it as a parameter so they stay framework-agnostic.
-- **Every value that reaches a Mongoose query filter must be validated as a primitive first.** `mongoose.set("sanitizeFilter", true)` is defence in depth, not the primary control.
+- **Every value that reaches a Mongoose query filter must be validated as a primitive first.** Per-field validation in `src/utils/validate.js` is the primary control. `sanitizeFilter` is defence in depth and **must be set on the library's own connection only** - `connection.set("sanitizeFilter", true)`. **Never `mongoose.set("sanitizeFilter", true)`**: verified against mongoose 8.24 by executing real queries, that global setting makes a host application's own `Model.find({ age: { $gt: 5 } })` throw `CastError`, which is precisely the global-singleton hijack H8 exists to eliminate. Also verified: per-query `.setOptions({ sanitizeFilter: true })` does **not** sanitize and is silently inert - do not use it.
 - **The consent ledger is append-only.** No code path may delete or mutate an existing event. Erasure removes PII from `Principal`, never events from `ConsentRecord`.
-- **Test commands:** `npm test` runs the whole suite via `node --test`. Every task that changes behaviour ships tests in the same commit.
+- **Test commands:** `npm test` runs the whole suite via bare `node --test` (no path argument). **Verified in this environment (Node v26.3.1): `node --test test/` FAILS** - it treats the positional `test/` as a module to load and reports a phantom failing test regardless of the real suite. Bare `node --test` discovers `test/**/*.test.js` correctly and treats `test/helpers/db.js` as a zero-test file. To run one file, invoke it directly: `node --test test/validate.test.js`. **Never write `npm test -- test/<file>`** - npm appends the argument, producing the broken two-path form. Every task that changes behaviour ships tests in the same commit.
 - **Commit style:** conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`). Every commit message body ends with the two trailer lines used in this repo:
   ```
   Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
@@ -56,22 +56,28 @@
 
 ## Task Dependency Order
 
+**Execution order is NOT task-number order.** Task numbers are stable identifiers; the order below is the order to run them in.
+
 ```
-T1  hygiene/packaging      (independent)
-T2  test harness + C2 fix  (independent; every later task uses the harness)
-T3  isolated connection    (needs T2)
-T4  Principal model split  (needs T3)
-T5  auth hook + router     (needs T4)
-T6  lawful basis model     (needs T2)
-T7  consent state machine  (needs T4, T6)
-T8  notice capture         (needs T6, T7)
-T9  age gate               (needs T7)
-T10 read path              (needs T4, T7)
-T11 lifecycle transitions  (needs T3)
-T12 HTTP layer             (needs T5)
-T13 browser surface        (needs T5, T12)
-T14 docs sync + suite      (last)
+ 1. T1  hygiene/packaging      (independent)
+ 2. T2  test harness + C2 fix  (independent; every later task uses the harness)
+ 3. T3  isolated connection    (needs T2)
+ 4. T4  Principal model split  (needs T3)
+ 5. T6  lawful basis model     (needs T2)
+ 6. T7  consent state machine  (needs T4, T6)
+ 7. T9  age gate               (needs T7)
+ 8. T5  auth hook + router     (needs T4, T6, T7, T9)   <-- moved after T7/T9
+ 9. T8  notice capture         (needs T6, T7, T5)
+10. T10 read path              (needs T4, T7, T5)
+11. T11 lifecycle transitions  (needs T3)
+12. T12 HTTP layer             (needs T5)
+13. T13 browser surface        (needs T5, T12)
+14. T14 docs sync + suite      (last)
 ```
+
+**Why T5 moves after T7 and T9.** T5's tests exercise `POST /consent` end to end. But between T3 and T7 the consent service is deliberately broken in transit: T4 deletes `derivePrincipalId`, T3 makes `lawfulBasisKind` and `receiptId` required event fields that the old event builder never sets, T3 removes `ConsentRecord.pii`, and T6 removes `entry.basis` and `entry.required`. Nothing creates a `Principal` until T4 and nothing writes a valid event until T7, so T5's `201` and `409` assertions cannot pass at the original position. Running T6 -> T7 -> T9 first means the service is whole before the router is rewritten around it.
+
+**T5 also absorbs the error middleware** that was originally in T12 Step 5, because T5 is where the router is rewritten and several of T5's own tests depend on `AppError` statuses reaching the client correctly. T12 keeps content negotiation, forms, and config validation.
 
 ---
 
@@ -159,7 +165,7 @@ PORT=4000
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test",
     "example": "node examples/server.js"
   },
   "peerDependencies": {
@@ -400,7 +406,7 @@ test("assertStringArray rejects non-arrays and non-string members", () => {
 
 - [ ] **Step 3: Run it to confirm it fails**
 
-Run: `npm test -- test/validate.test.js`
+Run: `node --test test/validate.test.js`
 Expected: FAIL - `Cannot find module '../src/utils/validate'`
 
 - [ ] **Step 4: Write `src/utils/validate.js`**
@@ -446,7 +452,7 @@ module.exports = { assertPrincipalId, assertNonEmptyString, assertStringArray };
 
 - [ ] **Step 5: Run the test to confirm it passes**
 
-Run: `npm test -- test/validate.test.js`
+Run: `node --test test/validate.test.js`
 Expected: PASS, 4/4
 
 - [ ] **Step 6: Write `test/helpers/db.js`**
@@ -537,7 +543,7 @@ test("withdrawConsent rejects a NoSQL operator instead of matching an arbitrary 
 
 - [ ] **Step 8: Run it to confirm it fails**
 
-Run: `npm test -- test/injection.test.js`
+Run: `node --test test/injection.test.js`
 Expected: FAIL - `withdrawConsent` currently accepts the operator object, matches the victim record, and appends a `withdrawn` event, so the assertion that it rejects with status 400 fails. This is the C2 vulnerability reproducing. Step 9 fixes it and this commit must end green.
 
 - [ ] **Step 9: Add the guard to `withdrawConsent`**
@@ -561,11 +567,9 @@ Leave the rest of the function's behaviour alone - T7 rewrites it. The `models` 
 
 In `src/db/connection.js`, at module scope:
 
-```js
-// Defence in depth. The primary control is per-field validation in
-// src/utils/validate.js - this catches anything that slips past it.
-mongoose.set("sanitizeFilter", true);
-```
+**Do NOT add a module-scope `mongoose.set("sanitizeFilter", true)`.** That is global process state: verified by executing real queries against mongoose 8.24, it makes a host application's own `Model.find({ age: { $gt: 5 } })` throw `CastError`, so merely requiring this library would corrupt an unrelated app's data access. T3 sets it on the library's own connection instead, which was verified to leave the host's default connection untouched.
+
+For this task, the per-field validation added in Step 4 is the whole control. Skip this step and note in your report that it was intentionally skipped, with the reason.
 
 - [ ] **Step 11: Add length caps to the free-text fields (M14)**
 
@@ -658,6 +662,35 @@ test("two connects to different URIs yield two independent connections", async (
   }
 });
 
+test("sanitizeFilter is scoped to our connection and does not break a host app's queries", async () => {
+  const server = await MongoMemoryServer.create();
+  try {
+    // A host application, using the global mongoose default connection.
+    const hostConn = await mongoose.createConnection(server.getUri()).asPromise();
+    const Host = hostConn.model("HostThing", new mongoose.Schema({ age: Number }));
+    await Host.create([{ age: 10 }, { age: 20 }]);
+
+    const ours = await connect(server.getUri());
+
+    // The host's legitimate operator query must still work.
+    const found = await Host.find({ age: { $gt: 5 } });
+    assert.equal(found.length, 2, "requiring this library must not break a host app's operator queries");
+
+    // Ours must reject an operator object.
+    const models = buildModels(ours);
+    await assert.rejects(
+      () => models.ConsentRecord.findOne({ principalId: { $gt: "" } }),
+      (err) => err.name === "CastError",
+      "our own connection must sanitize operator filters"
+    );
+
+    await ours.close();
+    await hostConn.close();
+  } finally {
+    await server.stop();
+  }
+});
+
 test("buildModels binds models to the given connection and does not pollute the global registry", async () => {
   const server = await MongoMemoryServer.create();
   try {
@@ -674,7 +707,7 @@ test("buildModels binds models to the given connection and does not pollute the 
 
 - [ ] **Step 2: Run it to confirm it fails**
 
-Run: `npm test -- test/connection.test.js`
+Run: `node --test test/connection.test.js`
 Expected: FAIL - the current `connect` returns `mongoose.connection`.
 
 - [ ] **Step 3: Rewrite `src/db/connection.js`**
@@ -682,10 +715,6 @@ Expected: FAIL - the current `connect` returns `mongoose.connection`.
 ```js
 const mongoose = require("mongoose");
 const { AppError } = require("../utils/errors");
-
-// Defence in depth. The primary control is per-field validation in
-// src/utils/validate.js - this catches anything that slips past it.
-mongoose.set("sanitizeFilter", true);
 
 /**
  * Opens an isolated connection this library owns.
@@ -703,6 +732,17 @@ async function connect(uri = process.env.MONGO_URI) {
     throw new AppError("MONGO_URI is not set - pass one explicitly or set it in the environment", 500);
   }
   const connection = mongoose.createConnection(uri);
+
+  // Defence in depth against query-operator injection, scoped to OUR
+  // connection. Deliberately not mongoose.set(...): that is global process
+  // state, and it would make a host application's own
+  // Model.find({ age: { $gt: 5 } }) throw CastError just because this library
+  // was required. Verified: set here, the host's default connection is
+  // unaffected while our queries still reject operator objects.
+  //
+  // The primary control remains per-field validation in utils/validate.js.
+  connection.set("sanitizeFilter", true);
+
   await connection.asPromise();
   return connection;
 }
@@ -868,6 +908,8 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
   - `generateDocRef(prefix)` - unchanged name, widened entropy (M7).
   - `models.Principal` with `{ principalId, emailHash, phoneHash, pii, erasedAt }`.
   - `findOrCreatePrincipal({ models, pii })` returns `{ principal, created }`.
+  - `findPrincipalByContact({ models, email, phone })` returns the matching `Principal` document or `null`. **Read-only - it must never create or modify anything.** The router needs to know whether a principal exists *before* it writes, so that `POST /consent` can refuse an unauthenticated update instead of performing the write and then reporting 409 after the damage is done.
+  - `findPrincipalById({ models, principalId })` returns the `Principal` or `null`, used by the authenticated update path so identity comes from the session rather than from supplied contact details.
   - `erasePrincipalPII({ models, principalId })` from `src/services/erasure.js`.
 
 - [ ] **Step 1: Write the failing test `test/principal.test.js`**
@@ -937,7 +979,7 @@ test("correcting an email keeps the same principalId and does not orphan the rec
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/principal.test.js`
+Run: `node --test test/principal.test.js`
 Expected: FAIL - `newPrincipalId` is not exported.
 
 - [ ] **Step 3: Write `src/models/Principal.js`**
@@ -989,6 +1031,7 @@ Note: no PII field is `required`. That is deliberate - erasure must be able to b
 ```js
 const crypto = require("node:crypto");
 const { AppError } = require("./errors");
+const { assertPrincipalId } = require("./validate");
 
 /**
  * A data principal's identifier is RANDOM, not derived.
@@ -1073,7 +1116,36 @@ async function findOrCreatePrincipal({ models, pii }) {
   return { principal, created };
 }
 
-module.exports = { newPrincipalId, lookupHash, generateDocRef, findOrCreatePrincipal };
+/**
+ * Read-only lookup by contact details. Creates nothing, modifies nothing.
+ *
+ * The router needs this to decide whether POST /consent is a signup or an
+ * update BEFORE it writes anything. Deciding after the write - by reading
+ * findOrCreatePrincipal's `created` flag - would mean an unauthenticated
+ * caller had already overwritten an existing person's name, phone, PAN and
+ * address by the time the 409 was sent, which is the whole of the C1 attack.
+ */
+async function findPrincipalByContact({ models, email, phone }) {
+  const or = [];
+  if (email && typeof email === "string") or.push({ emailHash: lookupHash(email) });
+  if (phone && typeof phone === "string") or.push({ phoneHash: lookupHash(phone) });
+  if (!or.length) return null;
+  return models.Principal.findOne({ $or: or });
+}
+
+async function findPrincipalById({ models, principalId }) {
+  assertPrincipalId(principalId);
+  return models.Principal.findOne({ principalId });
+}
+
+module.exports = {
+  newPrincipalId,
+  lookupHash,
+  generateDocRef,
+  findOrCreatePrincipal,
+  findPrincipalByContact,
+  findPrincipalById,
+};
 ```
 
 - [ ] **Step 5: Register `Principal` in `src/models/index.js`**
@@ -1226,9 +1298,17 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
 
 | Route | Auth |
 | --- | --- |
-| `POST /consent` | Unauthenticated **only** when it creates a new principal. If a principal already exists for the supplied email/phone, respond `409` with `{ error: "principal already exists - authenticate to update consent" }`. This is what closes the unauthenticated PII-overwrite path while still allowing signup. |
-| `PUT /consent/withdraw`, `POST /rights/exercise`, `POST /grievance`, `POST /grievance/:refId/escalate`, `POST /consent-manager`, and every `GET` read route from T10 | `resolvePrincipal(req)` must return a valid principalId, else `401`. |
-| `GET /rights`, `GET /grievance/new`, `GET /consent-manager/new`, `GET /consent/new` | Public - they are static informational pages. |
+| `POST /consent` | **Signup only.** Call `findPrincipalByContact` FIRST, before any write. If it returns a principal, respond `409 { error: "principal already exists - sign in to change your consent" }` and write nothing. If it returns null, proceed with `persistPIIwithconsent`. |
+| `PUT /consent` | **Authenticated consent update.** Takes `consentTypes` and optional `regrant`. Loads the principal by `req.principalId` ONLY - never by supplied contact details. Ignores any `pii.email`/`pii.phone` that hashes to a different principal, rejecting with `403`. |
+| `PUT /consent/withdraw` **and** `POST /consent/withdraw` | Same handler, both methods. `PUT` is for API clients; `POST` exists because an HTML form cannot issue `PUT`, and without it the T13 withdrawal page has nothing to submit to. |
+| `POST /rights/exercise`, `POST /grievance`, `POST /grievance/:refId/escalate`, `POST /consent-manager`, and every `GET` read route from T10 | `resolvePrincipal(req)` must return a valid principalId, else `401`. |
+| `GET /rights`, `GET /grievance/new`, `GET /consent-manager/new`, `GET /consent/new` | Public - static informational pages. |
+| `GET /consent`, `GET /consent/withdraw` | Authenticated. |
+
+**Two things the 409 rule must get right, both of which are C1 reopening if missed:**
+
+1. **Check before you write.** The existence check happens *before* `persistPIIwithconsent` is called. Reading `result.created` afterwards is too late: by then the existing principal's `pii` has already been overwritten and consent delta events already appended. There must be a test asserting the stored PII and the ledger are unchanged after a 409.
+2. **The authenticated update path resolves identity from the session, not the payload.** `persistPIIwithconsent` finds the principal via `findOrCreatePrincipal({ pii })`, i.e. by contact hash. If `PUT /consent` passed a caller-supplied email through to it, any authenticated principal could submit a *different* person's email and overwrite that person's PII and ledger - the C1 attack again, merely requiring any account. So `PUT /consent` must load by `req.principalId` and, if supplied contact details resolve to a different principal, return `403`.
 
 - [ ] **Step 1: Write the failing test `test/auth.test.js`**
 
@@ -1347,7 +1427,7 @@ test("escalateToBoard refuses a refId belonging to another principal", async () 
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/auth.test.js`
+Run: `node --test test/auth.test.js`
 Expected: FAIL - the current router has no auth at all.
 
 - [ ] **Step 3: Rewrite `src/http/router.js`**
@@ -1376,14 +1456,18 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
    *
    * With no resolvePrincipal configured every mutating route denies, so a
    * misconfigured deployment fails closed rather than open.
+   *
+   * The hook may be sync or async - resolving a session to a principal is
+   * usually a database lookup, and a non-awaited Promise would fail the string
+   * check and 401 every request with nothing to explain why.
    */
-  function requireAuth(req, res, next) {
+  async function requireAuth(req, res, next) {
     if (typeof resolvePrincipal !== "function") {
       return res.status(401).json({ error: "authentication required" });
     }
     let id;
     try {
-      id = resolvePrincipal(req);
+      id = await resolvePrincipal(req);
     } catch {
       return res.status(401).json({ error: "authentication required" });
     }
@@ -1396,11 +1480,97 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
 
   // ... routes, each mutating one wrapped in requireAuth and passing
   // req.principalId (never req.body.principalId) into the service.
+
+  // Error mapper, registered LAST. Replaces the six per-route catch blocks.
+  // See Step 3d for the full version and why the branch order matters.
   return router;
 }
 ```
 
 Note `express.urlencoded({ extended: false })` - `extended: true` is what let a cross-origin form build `principalId[$ne]`. `extended: false` produces only string values, removing that delivery path entirely.
+
+- [ ] **Step 3b: Normalise the request body before it reaches any service**
+
+`extended: false` has a consequence the services must not absorb. Verified: `querystring.parse("consentTypes=marketing")` yields the **string** `"marketing"`, and an array only when two or more boxes are ticked. So a data principal who ticks exactly one purpose would hit `assertStringArray`'s `400 consentTypes must be an array of strings`. Worse, unticking *every* box submits no `consentTypes` field at all, which T7 reads as "no consent decision was made" - so a deliberate "I decline everything" would silently record nothing.
+
+Add these two helpers to the router and use them on `POST /consent` and both withdraw methods:
+
+```js
+/**
+ * An HTML checkbox group sends one value as a string and two as an array, so a
+ * single ticked box would otherwise fail array validation.
+ */
+function asArray(value) {
+  if (value === undefined || value === null) return undefined;
+  return Array.isArray(value) ? value : [value];
+}
+
+/**
+ * The consent form always posts a hidden consentSubmitted=1, so an
+ * all-unchecked submission is a real decision ("decline everything") rather
+ * than being mistaken for a PII-only update that touches no consent.
+ */
+function readConsentTypes(body) {
+  const types = asArray(body.consentTypes);
+  if (types !== undefined) return types;
+  return body.consentSubmitted ? [] : undefined;
+}
+
+/**
+ * Accepts both wire shapes: nested { pii: {...} } from JSON API clients and
+ * flat top-level fields from an HTML form. Never spreads req.body wholesale
+ * into pii - that would let a caller inject arbitrary schema paths.
+ */
+function readPii(body) {
+  if (body.pii && typeof body.pii === "object") return body.pii;
+  const { name, email, phone, dob, pan, address } = body;
+  const pii = { name, email, phone, dob, pan, address };
+  for (const k of Object.keys(pii)) if (pii[k] === undefined) delete pii[k];
+  return pii;
+}
+```
+
+The `POST /consent` handler therefore reads `const pii = readPii(req.body)` and `const consentTypes = readConsentTypes(req.body)`, and passes those - never `req.body` itself.
+
+- [ ] **Step 3c: Convert the three services' deliberate throws to `AppError`**
+
+`exerciseRight` (`dataPrincipalRights.js:25`), `complaintToTheBoard.js:19-20` and `consentManagerRequest.js:18-19` still `throw new Error(...)`. A plain `Error` has no `.status` and `name === "Error"`, so the Step 6 mapper would send `500 { error: "internal error" }` for every malformed request to those three routes - the mirror image of M6, which this branch exists to fix. Replace each deliberate throw with `new AppError(message, 400)`, or `404` where a lookup misses, and validate their string inputs with `assertNonEmptyString`.
+
+- [ ] **Step 3d: Install the single error mapper (moved here from T12)**
+
+Every handler becomes `async (req, res, next) => { try { ... } catch (err) { next(err); } }`, and this middleware is registered after all routes:
+
+```js
+router.use((err, req, res, _next) => {
+  // Branch order matters, and each branch closes a specific hole.
+  //
+  // Previously all six routes did res.status(400).json({ error: err.message }),
+  // so a database outage read as a client error and Mongo internals leaked.
+
+  // Mongoose input faults are the CLIENT's fault. CastError included: sending
+  // pii.pan as an object or a malformed date produces one, and reporting that
+  // as 500 would repeat the bug in the opposite direction. Send the field name,
+  // not mongoose's raw text.
+  if (err && (err.name === "ValidationError" || err.name === "CastError")) {
+    const fields = err.errors ? Object.keys(err.errors).join(", ") : err.path;
+    return res.status(400).json({ error: `Invalid value for: ${fields}` });
+  }
+
+  // A deliberate AppError below 500 is safe to echo - the message is written
+  // for the caller. At or above 500 it is NOT: AppError(..., 500) carries
+  // internal configuration detail (utils/principalId.js throws one naming
+  // PRINCIPAL_ID_SECRET and how to generate it, and that path is reachable
+  // from the unauthenticated POST /consent route).
+  if (err && typeof err.status === "number" && err.status < 500) {
+    return res.status(err.status).json({ error: err.message });
+  }
+
+  console.error("[dpdp-toolkit] unhandled error:", err);
+  res.status(err && typeof err.status === "number" ? err.status : 500).json({ error: "internal error" });
+});
+```
+
+Add two tests for this in `test/auth.test.js`: an `AppError` thrown with status 500 must not echo its message, and a `CastError` must come back as 400.
 
 - [ ] **Step 4: Add the ownership check to `escalateToBoard`**
 
@@ -1469,7 +1639,7 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
   - `RIGHTS_CATALOG` with corrected descriptions.
   - `FIDUCIARY` unchanged in shape.
 
-**The substantive fix:** the Act recognises consent plus an enumerated list of legitimate uses. It has no general contractual-necessity ground. `underwriting` was marked non-withdrawable on the basis "Necessary to perform your loan contract", which is a GDPR concept - so the toolkit refused a withdrawal the statute guarantees. Underwriting becomes consent-based and withdrawable; only `kyc`, which rests on a statutory obligation, stays a legitimate use.
+**The substantive fix:** the Act recognises consent plus an enumerated list of legitimate uses. It has no general contractual-necessity ground. `underwriting` was marked non-withdrawable on the basis "Necessary to perform your loan contract", which is a GDPR concept - so the toolkit refused a withdrawal the statute guarantees. Underwriting becomes consent-based and withdrawable. The old single `kyc` purpose is split: `kyc_reporting` cites Section 7(d) (the only clause a private fiduciary's statutory duty can rest on, and only for disclosure to the State) and stays non-withdrawable, while `identity_verification` - our own checks and record-keeping, which go beyond that disclosure duty - becomes consent-based and withdrawable.
 
 - [ ] **Step 1: Write the failing test `test/catalog.test.js`**
 
@@ -1477,6 +1647,15 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { getCatalog, getValidConsentTypes, getWithdrawableTypes, RIGHTS_CATALOG } = require("../src/config/catalog");
+
+// The real Section 7 sub-clauses, verified against the statute text. A
+// legitimate use must cite one of these exactly. A prefix check like
+// /^Section 7/ would bless "Section 7(b)" for a private lender's KYC, which is
+// the State subsidy clause - so pin the enumeration instead.
+const ALLOWED_S7_CLAUSES = [
+  "Section 7(a)", "Section 7(b)", "Section 7(c)", "Section 7(d)", "Section 7(e)",
+  "Section 7(f)", "Section 7(g)", "Section 7(h)", "Section 7(i)",
+];
 
 test("no purpose claims contractual necessity as a lawful basis", () => {
   for (const entry of getCatalog()) {
@@ -1487,8 +1666,25 @@ test("no purpose claims contractual necessity as a lawful basis", () => {
     );
     assert.ok(["consent", "legitimate_use"].includes(entry.lawfulBasis.kind));
     if (entry.lawfulBasis.kind === "legitimate_use") {
-      assert.match(entry.lawfulBasis.clause, /^Section 7/, `${entry.type}: a legitimate use must cite its clause`);
+      assert.ok(
+        ALLOWED_S7_CLAUSES.includes(entry.lawfulBasis.clause),
+        `${entry.type}: "${entry.lawfulBasis.clause}" is not a real Section 7 sub-clause`
+      );
     }
+  }
+});
+
+test("no legitimate use claims a general compliance-with-legal-obligation ground", () => {
+  // Section 7 contains no such ground for a private fiduciary. 7(d) is confined
+  // to disclosure obligations owed to the State, so a description asserting a
+  // broad legal-obligation basis is a misstatement of the Act.
+  for (const entry of getCatalog()) {
+    if (entry.lawfulBasis.kind !== "legitimate_use") continue;
+    assert.doesNotMatch(
+      entry.lawfulBasis.description,
+      /compliance with a legal obligation/i,
+      `${entry.type}: no such ground exists - cite what the clause actually authorises`
+    );
   }
 });
 
@@ -1499,10 +1695,19 @@ test("underwriting is consent-based and therefore withdrawable", () => {
   assert.ok(getWithdrawableTypes().includes("underwriting"));
 });
 
-test("kyc rests on a cited legitimate use and is not withdrawable", () => {
-  const k = getCatalog().find((e) => e.type === "kyc");
+test("the PMLA reporting duty rests on 7(d) and is not withdrawable", () => {
+  const k = getCatalog().find((e) => e.type === "kyc_reporting");
   assert.equal(k.lawfulBasis.kind, "legitimate_use");
+  assert.equal(k.lawfulBasis.clause, "Section 7(d)");
   assert.equal(k.withdrawable, false);
+});
+
+test("identity verification beyond the disclosure duty is consent-based and withdrawable", () => {
+  // The 7(d) cover extends only to disclosing information to the State. Our own
+  // verification and record-keeping is wider, so it needs consent.
+  const v = getCatalog().find((e) => e.type === "identity_verification");
+  assert.equal(v.lawfulBasis.kind, "consent");
+  assert.equal(v.withdrawable, true);
 });
 
 test("the derived lists reflect catalog changes made after import", () => {
@@ -1529,7 +1734,7 @@ test("the erasure right is not described with a precondition the Act does not im
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/catalog.test.js`
+Run: `node --test test/catalog.test.js`
 Expected: FAIL on all five - the current catalog uses `basis`/`required` and says "no longer needed".
 
 - [ ] **Step 3: Rewrite `src/config/catalog.js`**
@@ -1550,16 +1755,49 @@ Expected: FAIL on all five - the current catalog uses `basis`/`required` and say
 // guarantees.
 // ---------------------------------------------------------------------------
 const CONSENT_CATALOG = [
+  // IMPORTANT - read before changing this entry.
+  //
+  // Section 7 has NO general "compliance with a legal obligation" ground for a
+  // private data fiduciary. The clauses were checked against the statute text:
+  //   7(b) - the State providing a subsidy, benefit, service, certificate,
+  //          licence or permit. Nothing to do with a private lender.
+  //   7(c) - the State performing a function under law.
+  //   7(d) - "fulfilling any obligation under any law ... on any person to
+  //          disclose any information to the State or any of its
+  //          instrumentalities". THIS is the only clause a private fiduciary's
+  //          statutory duty can rest on, and only for the DISCLOSURE limb.
+  //
+  // So the PMLA reporting obligation - handing prescribed information to the
+  // Financial Intelligence Unit - fits 7(d). Verifying a customer's identity
+  // for our OWN records goes beyond that disclosure duty, and processing for
+  // that purpose needs consent under Section 6. Modelling the whole of "KYC"
+  // as non-withdrawable would repeat exactly the mistake H1 was raised for:
+  // refusing a withdrawal the Act guarantees, on a basis that does not cover it.
   {
-    type: "kyc",
-    title: "Identity verification (KYC)",
-    purpose: "Verifying who you are before opening an account, as the law requires us to.",
+    type: "kyc_reporting",
+    title: "Anti-money-laundering reporting",
+    purpose:
+      "Reporting the information the law requires us to report about you to the Financial Intelligence Unit.",
     lawfulBasis: {
       kind: "legitimate_use",
-      clause: "Section 7(b)",
-      description: "Compliance with a legal obligation - Prevention of Money-Laundering Act, 2002",
+      clause: "Section 7(d)",
+      description:
+        "Obligation under law to disclose information to the State - reporting under the Prevention of Money-Laundering Act, 2002",
     },
     withdrawable: false,
+    prohibitedForChildren: false,
+    retentionMonths: 60,
+  },
+  {
+    type: "identity_verification",
+    title: "Identity verification (KYC checks)",
+    purpose: "Checking that you are who you say you are, and keeping a record of that check.",
+    // Consent-based: this is our own verification and record-keeping, which is
+    // wider than the Section 7(d) disclosure obligation above, so it does not
+    // inherit that clause's cover.
+    lawfulBasis: { kind: "consent", clause: "Section 6", description: "Your consent" },
+    withdrawable: true,
+    prohibitedForChildren: false,
     retentionMonths: 60,
   },
   {
@@ -1626,7 +1864,7 @@ Export both the functions and, for backwards compatibility with `src/index.js`, 
 
 - [ ] **Step 4: Run the tests**
 
-Run: `npm test -- test/catalog.test.js`
+Run: `node --test test/catalog.test.js`
 Expected: PASS 5/5
 
 - [ ] **Step 5: Commit**
@@ -1642,11 +1880,23 @@ The catalog marked underwriting non-withdrawable with the basis
 Act has no general contractual-necessity ground - it has consent plus the
 enumerated legitimate uses in Section 7 - so the toolkit was refusing a
 withdrawal the statute guarantees. Underwriting is consent-based and
-withdrawable; only kyc, resting on a statutory obligation, is a
-legitimate use, and it now cites its clause.
+withdrawable.
+
+The single kyc purpose is also split, because Section 7 has no general
+compliance-with-legal-obligation ground for a private fiduciary. Checked
+against the statute: 7(b) is the State issuing a subsidy or licence, 7(c)
+is the State performing a function under law, and 7(d) - the only clause
+that can carry a private duty - is confined to disclosing information to
+the State. So kyc_reporting cites 7(d) for the PMLA reporting obligation
+and stays non-withdrawable, while identity_verification, which is our own
+record-keeping and wider than that disclosure duty, is consent-based and
+withdrawable. Citing 7(b) here would have repeated the same class of
+error this commit fixes.
 
 - lawfulBasis { kind, clause, description } replaces basis + required
 - withdrawable is derived from the basis kind, not set by hand
+- the catalog test pins an allow-list of real Section 7 sub-clauses
+  instead of matching a /^Section 7/ prefix, which would bless any letter
 - derived type lists become functions, so a catalog customised at boot no
   longer half-applies
 - the erasure right no longer tells the principal it only covers data
@@ -1767,14 +2017,14 @@ test("a profile update that omits consentTypes does not silently withdraw a live
   });
 });
 
-test("underwriting can now be withdrawn, and kyc still cannot", async () => {
+test("underwriting can now be withdrawn, and the 7(d) reporting duty still cannot", async () => {
   await withDb(async (conn) => {
     const models = buildModels(conn);
     const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["underwriting"] });
-    const r = await withdrawConsent({ models, principalId, consentTypes: ["underwriting", "kyc"] });
+    const r = await withdrawConsent({ models, principalId, consentTypes: ["underwriting", "kyc_reporting"] });
     assert.deepEqual(r.withdrawn, ["underwriting"]);
     assert.equal(r.rejected.length, 1);
-    assert.equal(r.rejected[0].type, "kyc");
+    assert.equal(r.rejected[0].type, "kyc_reporting");
   });
 });
 
@@ -1809,7 +2059,7 @@ test("an onWithdrawal hook fires with the purposes that actually changed", async
     const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing", "analytics"] });
     const calls = [];
     await withdrawConsent({
-      models, principalId, consentTypes: ["marketing", "kyc"],
+      models, principalId, consentTypes: ["marketing", "kyc_reporting"],
       onWithdrawal: (payload) => calls.push(payload),
     });
     assert.equal(calls.length, 1);
@@ -1821,7 +2071,7 @@ test("an onWithdrawal hook fires with the purposes that actually changed", async
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/consent.test.js`
+Run: `node --test test/consent.test.js`
 Expected: FAIL on most - the current service always rewrites every purpose.
 
 - [ ] **Step 3: Rewrite `persistPIIwithconsent.js`**
@@ -1995,28 +2245,44 @@ module.exports = withdrawConsent;
 
 Wrap the `record.save()` for a newly built `ConsentRecord` so a concurrent double-submit does not surface a raw E11000:
 
+The recovery must **recompute** the delta against the winning document, not replay the events computed against the losing one. `newEvents` was derived from an empty state, so re-pushing it onto a record that already has those events would append a duplicate `granted`/`denied` for every purpose - and because the ledger is append-only by design, those duplicates can never be removed. That would break the very invariant this task establishes.
+
 ```js
-try {
-  await record.save();
-} catch (err) {
-  if (err && err.code === 11000) {
-    // Another request created the record between our findOne and save.
-    // Re-read and re-apply this transaction's events onto the winner.
+async function saveWithRaceRecovery({ models, record, principalId, notice, now, decideFor }) {
+  try {
+    await record.save();
+    return { record, events: record.$dpdpNewEvents || [] };
+  } catch (err) {
+    if (!err || err.code !== 11000) throw err;
+
+    // Another request created this principal's record between our findOne and
+    // our save. Re-read the winner and recompute the delta against ITS state.
     const existing = await models.ConsentRecord.findOne({ principalId });
     if (!existing) throw err;
-    existing.events.push(...newEvents);
-    existing.updatedAt = now;
+
+    const recomputed = decideFor(existing.currentState());
+    if (recomputed.length) {
+      existing.events.push(...recomputed);
+      existing.updatedAt = now;
+    }
+    // Re-apply the notice snapshot: it was set on the losing document and
+    // would otherwise be silently dropped, taking H3's evidence with it.
+    if (notice) {
+      existing.lastNotice = { version: notice.version, language: notice.language, body: notice, shownAt: now };
+    }
     await existing.save();
-    record = existing;
-  } else {
-    throw err;
+    return { record: existing, events: recomputed };
   }
 }
 ```
 
+Structure `persistPIIwithconsent` so the `decide()` loop is a callable taking a state object (`decideFor(state)` returning the event array), then use it for both the first attempt and the recovery. Return the **recomputed** events so the response's `events` array is truthful.
+
+Add a concurrency test: fire two identical `persistPIIwithconsent` calls with `Promise.all` and assert the ledger holds exactly one event per purpose.
+
 - [ ] **Step 6: Run the tests**
 
-Run: `npm test -- test/consent.test.js`
+Run: `node --test test/consent.test.js`
 Expected: PASS 9/9
 
 - [ ] **Step 7: Commit**
@@ -2123,7 +2389,7 @@ test("the notice shown at consent time is stored with the record", async () => {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/notice.test.js`
+Run: `node --test test/notice.test.js`
 Expected: FAIL - `src/config/notice.js` does not exist.
 
 - [ ] **Step 3: Write `src/config/notice.js`**
@@ -2212,6 +2478,55 @@ if (notice) {
 }
 ```
 
+- [ ] **Step 4b: Wire `buildNotice()` into `POST /consent` - otherwise H3 is not closed**
+
+Add `src/http/router.js` to this task's Files list. Without this step the notice is snapshotted only when a direct service caller hands one in, and the only test exercising it calls the service directly - so over HTTP, which is every consent a real deployment captures, `notice` is `undefined` and `record.lastNotice` is never set. `getConsentState` would always return `notice: null` while the suite reported H3 closed.
+
+In the `POST /consent` handler (and the `PUT /consent` update handler), build the notice and pass it through:
+
+```js
+const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
+const result = await persistPIIwithconsent({ models, pii, consentTypes, regrant, notice });
+```
+
+`GET /consent/new` (T13) must render the same object it will store, so the principal sees exactly what gets snapshotted.
+
+Add an HTTP-level test asserting `record.lastNotice.version` is set after a `POST /consent`, not just after a direct service call.
+
+- [ ] **Step 4c: Add the notice items the Act requires**
+
+Section 5(1) requires the notice to state the personal data and the purpose, **the manner in which the principal may exercise their rights**, and **the manner of making a complaint to the Board**. The DPDP Rules, 2025 add an itemised description of the personal data and the means of withdrawing consent. The `body` object in Step 3 covers purposes, rights and grievance but omits three items. Extend it:
+
+```js
+  // Rule 3(b)(i) - an itemised description of the personal data, not just the
+  // purposes it is used for.
+  personalData: [
+    { field: "name", description: "Your full name" },
+    { field: "email", description: "Your email address" },
+    { field: "phone", description: "Your mobile number" },
+    { field: "dob", description: "Your date of birth" },
+    { field: "pan", description: "Your PAN, where we are required to collect it" },
+    { field: "address", description: "Your postal address" },
+  ],
+  // Rule 3(c)(i) - how to withdraw, with ease comparable to giving consent.
+  withdrawal: {
+    description: "You can withdraw consent for any consent-based purpose at any time, as easily as you gave it.",
+    path: "/consent/withdraw",
+  },
+  // Section 5(1)(iii) - the manner of complaining to the Board.
+  boardComplaint: {
+    description:
+      "Raise it with our Grievance Officer first. If it is not resolved within the stated period, you may complain to the Data Protection Board of India directly.",
+    grievancePath: "/grievance/new",
+  },
+```
+
+Also add the Section 6(4) right of withdrawal to `RIGHTS_CATALOG` in T6's catalog, so the notice's `rights` array actually enumerates it - today withdrawal is a right the notice never lists. Tighten the Step 1 test to assert `personalData`, `withdrawal` and `boardComplaint` are all present and non-empty.
+
+- [ ] **Step 4d: Add `NOTICE_LANGUAGES` to `.env.example`**
+
+This step introduces `process.env.NOTICE_LANGUAGES`. `.env.example` is written once in T1 and no later task amends it, so without this the file that L9 exists to make complete ships incomplete again. Append it with its default of `en` and a comment listing the Eighth Schedule codes.
+
 - [ ] **Step 5: Add the DPO contact to rights and withdrawal responses (L6)**
 
 In `src/config/catalog.js`, export:
@@ -2273,7 +2588,7 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
 
 - [ ] **Step 1: Add the flag to the catalog**
 
-`marketing` and `analytics` gain `prohibitedForChildren: true`; `kyc` and `underwriting` get `false`.
+`marketing` and `analytics` gain `prohibitedForChildren: true`. `kyc_reporting`, `identity_verification` and `underwriting` get `false` (T6 already sets it on the first two).
 
 - [ ] **Step 2: Write the failing test `test/children.test.js`**
 
@@ -2355,7 +2670,7 @@ test("an adult is unaffected", async () => {
 
 - [ ] **Step 3: Run to confirm it fails**
 
-Run: `npm test -- test/children.test.js`
+Run: `node --test test/children.test.js`
 Expected: FAIL - no age handling exists.
 
 - [ ] **Step 4: Write `src/utils/age.js`**
@@ -2509,7 +2824,7 @@ test("GET /consent returns the ledger to the authenticated owner only", async ()
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/readpath.test.js`
+Run: `node --test test/readpath.test.js`
 Expected: FAIL - `src/services/consentState.js` does not exist.
 
 - [ ] **Step 3: Write `src/services/consentState.js`**
@@ -2688,7 +3003,7 @@ test("re-escalation does not overwrite the original escalation date", async () =
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/lifecycle.test.js`
+Run: `node --test test/lifecycle.test.js`
 Expected: FAIL - `src/services/requestLifecycle.js` does not exist.
 
 - [ ] **Step 3: Write `src/services/requestLifecycle.js`**
@@ -2710,7 +3025,14 @@ const { AppError } = require("../utils/errors");
  * own grievance, and the fiduciary's staff auth is the host's concern.
  */
 const RIGHTS_TRANSITIONS = { received: ["in_progress", "closed"], in_progress: ["closed"], closed: [] };
-const GRIEVANCE_TRANSITIONS = { open: ["in_progress", "resolved", "escalated"], in_progress: ["resolved", "escalated"], resolved: [], escalated: ["resolved"] };
+// "escalated" is deliberately NOT reachable from here. escalateToBoard is the
+// only path into that state, because it is the only one that checks the SLA has
+// lapsed and sets escalatedAt/escalatedToBoard. Allowing it here would let a
+// grievance sit in status "escalated" with escalatedAt null and
+// escalatedToBoard false - two fields contradicting each other in the audit
+// record - and the re-escalation guard would then dereference null and return
+// 500 to a data principal exercising an escalation right.
+const GRIEVANCE_TRANSITIONS = { open: ["in_progress", "resolved"], in_progress: ["resolved"], resolved: [], escalated: ["resolved"] };
 const CM_TRANSITIONS = { received: ["connected", "closed"], connected: ["closed"], closed: [] };
 
 function assertTransition(map, from, to, kind) {
@@ -2750,15 +3072,26 @@ module.exports = { advanceRightsRequest, advanceGrievance, advanceConsentManager
 
 - [ ] **Step 4: Guard re-escalation in `escalateToBoard` (L3)**
 
+Null-safe, because a document could reach `escalated` by a route this plan does not control (a direct database edit, or a future caller):
+
 ```js
 if (grievance.status === "escalated") {
-  throw new AppError(`This grievance was already escalated on ${grievance.escalatedAt.toISOString()}`, 409);
+  const when = grievance.escalatedAt ? grievance.escalatedAt.toISOString() : "earlier";
+  throw new AppError(`This grievance was already escalated on ${when}`, 409);
 }
 ```
 
-- [ ] **Step 5: Add `slaDueAt` and `resolution` to `RightsRequest`**
+Add a test asserting `advanceGrievance({ status: "escalated" })` is refused with 409.
 
-`slaDueAt: { type: Date, required: true }` and `resolution: { type: String, default: "", maxlength: 5000 }`. `exerciseRight` sets `slaDueAt` from a new `RIGHTS_SLA_DAYS` config (default 30).
+- [ ] **Step 5: Add the missing schema fields**
+
+`RightsRequest` gains `slaDueAt: { type: Date, required: true }` and `resolution: { type: String, default: "", maxlength: 5000 }`. `exerciseRight` sets `slaDueAt` from a new `RIGHTS_SLA_DAYS` config (default 30).
+
+**`Grievance` also needs `resolution: { type: String, default: "", maxlength: 5000 }`.** It has no such path today, so under Mongoose's default `strict: true` the `advance()` helper's `row.resolution = resolution` is dropped with no error and no warning - the fiduciary's record of *how* a grievance was resolved, which is the substantive output of Section 13 redressal and the first thing an auditor would ask for, silently lost on every closure while the signature and the passing test both imply it was saved. Assert `row.resolution` in the grievance test.
+
+`ConsentManagerRequest` has no `resolution` concept, so `advanceConsentManagerRequest` must not accept the parameter - its signature is `{ models, refId, status }` only.
+
+Also append `RIGHTS_SLA_DAYS` to `.env.example` with its default of 30. That file is written once in T1 and no later task amends it, so a variable introduced here would recreate exactly the L9 gap this branch closed.
 
 - [ ] **Step 6: Run the tests**
 
@@ -2966,7 +3299,7 @@ test("the grievance response does not claim delivery the toolkit cannot perform"
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/http.test.js`
+Run: `node --test test/http.test.js`
 Expected: FAIL on negotiation, mount path, error mapping, config guard, and copy.
 
 - [ ] **Step 3: Write `src/http/negotiate.js`**
@@ -3013,28 +3346,9 @@ function assertConfigured() {
 
 `createRouter` calls `assertConfigured()` before building routes.
 
-- [ ] **Step 5: Add the error mapper to the router**
+- [ ] **Step 5: (moved) The error mapper now lands in T5 Step 3d**
 
-Replace all six per-route catch blocks with one `next(err)` plus a single error middleware, registered last:
-
-```js
-router.use((err, req, res, _next) => {
-  // An AppError carries a deliberate status. Anything else is an internal
-  // fault: report 500 and a generic body, and log the detail server-side.
-  // Previously every error became 400 with err.message, so a database
-  // outage read as a client error and Mongo internals leaked to callers.
-  if (err && err.name === "ValidationError") {
-    return res.status(400).json({ error: err.message });
-  }
-  if (err && typeof err.status === "number") {
-    return res.status(err.status).json({ error: err.message });
-  }
-  console.error("[dpdp-toolkit] unhandled error:", err);
-  res.status(500).json({ error: "internal error" });
-});
-```
-
-Every handler becomes `async (req, res, next) => { try { ... } catch (err) { next(err); } }`.
+M6 is closed by T5 Step 3d, which installs the single error middleware when the router is rewritten - several of T5's own tests depend on `AppError` statuses reaching the client, so it could not wait until here. **Do not add a second error middleware.** Verify T5's version is present and registered after all routes, and confirm no per-route `catch` block remains that swallows an error into a `res.status(400)`. If you find one, fix it here and say so in your report.
 
 - [ ] **Step 6: Make forms mount-relative (M1) and fix the copy (H7)**
 
@@ -3134,7 +3448,7 @@ test("the consent page states the notice and offers a checkbox per optional purp
       const html = await res.text();
       assert.match(html, /name="consentTypes" value="marketing"/);
       assert.match(html, /name="consentTypes" value="analytics"/);
-      assert.doesNotMatch(html, /name="consentTypes" value="kyc"/,
+      assert.doesNotMatch(html, /name="consentTypes" value="kyc_reporting"/,
         "a legitimate use is not a choice - it must be stated, not offered as a checkbox");
       assert.match(html, /Prevention of Money-Laundering Act/, "the notice must state each lawful basis");
       assert.match(html, /name="dob"/, "the age gate needs a date of birth field");
@@ -3178,7 +3492,7 @@ test("a withdrawal page exists, with the same prominence as consenting", async (
       const html = await res.text();
       assert.match(html, /name="consentTypes" value="marketing"/);
       assert.match(html, /<form[^>]*method="POST"/i);
-      assert.doesNotMatch(html, /name="consentTypes" value="kyc"/, "a non-withdrawable purpose must not be offered");
+      assert.doesNotMatch(html, /name="consentTypes" value="kyc_reporting"/, "a non-withdrawable purpose must not be offered");
     } finally {
       await new Promise((r) => server.close(r));
     }
@@ -3208,7 +3522,7 @@ test("rendered forms no longer demand a principalId the page cannot supply", asy
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `npm test -- test/browser.test.js`
+Run: `node --test test/browser.test.js`
 Expected: FAIL - no consent page, no withdrawal page, and the forms still ask for `principalId`.
 
 - [ ] **Step 3: Implement the three renderers and remove the `principalId` inputs**
@@ -3218,6 +3532,66 @@ Every form drops its `principalId` field - identity comes from `requireAuth`. Re
 - [ ] **Step 4: Wire the routes**
 
 `GET /consent/new` public, `POST /consent` returning the receipt page when `wantsHtml(req)`, `GET /consent/withdraw` behind `requireAuth`.
+
+**Verify `POST /consent/withdraw` exists** (T5 Step 3's route table adds it alongside the `PUT`). An HTML form can only issue GET or POST, so without the POST alias the rendered withdrawal form has no route to submit to and every browser user who ticks a purpose gets a 404 - the withdrawal page would dead-end exactly the way the three forms it exists to fix did, and H6 would be reported closed while withdrawal remained impossible for the non-API audience this task is written for. If T5 did not add it, add it here behind `requireAuth`, sharing the `PUT` handler.
+
+The withdrawal form must post `consentSubmitted=1` as a hidden field alongside the checkboxes, so an all-unchecked submission is distinguishable from an empty one (T5 Step 3b).
+
+- [ ] **Step 4b: Actually submit the rendered forms in the tests**
+
+The Step 1 tests only pattern-match markup, so they would pass against a form whose action 404s. Add two tests that submit:
+
+```js
+test("the rendered withdrawal form can actually be submitted", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing", "analytics"] });
+    const app = express();
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => principalId }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      const res = await fetch(`http://localhost:${port}/dpdp/consent/withdraw`, {
+        method: "POST",
+        headers: { ...HTML, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ consentSubmitted: "1", consentTypes: "marketing" }),
+      });
+      assert.equal(res.status, 200, "a form POST must reach a real route, not 404");
+
+      const record = await models.ConsentRecord.findOne({ principalId });
+      const state = record.currentState();
+      assert.equal(state.marketing.status, "withdrawn");
+      assert.equal(state.analytics.status, "granted", "only the ticked purpose is withdrawn");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+test("a single ticked checkbox is accepted, not rejected as a non-array", async () => {
+  // extended:false parses one value as a string and two as an array, so this is
+  // the case that would 400 without the router's normalisation.
+  await withDb(async (conn) => {
+    const app = express();
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => null }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      const res = await fetch(`http://localhost:${port}/dpdp/consent`, {
+        method: "POST",
+        headers: { ...HTML, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          name: "Asha", email: "single@example.com", phone: "9000000001",
+          dob: "1990-04-01", consentSubmitted: "1", consentTypes: "marketing",
+        }),
+      });
+      assert.equal(res.status, 201);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+```
 
 - [ ] **Step 5: Run the tests**
 
@@ -3303,25 +3677,47 @@ test("derivePrincipalId is gone - it was the guessable-identity bug", () => {
 
 It must demonstrate `resolvePrincipal`. Use a deliberately minimal, clearly-labelled demo session so the example is not mistaken for production auth:
 
+The session map must actually get populated, or every authenticated route 401s and the example demonstrates nothing beyond `POST /consent`:
+
 ```js
 require("dotenv").config();
+const crypto = require("node:crypto");
 const express = require("express");
-const session = require("node:crypto"); // not a real session store
-const { connect, createRouter } = require("../src/index");
+const { connect, createRouter, buildModels } = require("../src/index");
+const { findPrincipalByContact } = require("../src/utils/principalId");
 
 async function main() {
   const db = await connect(process.env.MONGO_URI);
+  const models = buildModels(db);
   const app = express();
 
-  // DEMO ONLY. A real deployment authenticates the data principal - an
-  // emailed one-time link or an existing account session - and returns the
-  // principalId from that. Never trust a client-supplied value.
+  // DEMO ONLY - an in-memory token map, not a session store.
+  //
+  // A real deployment authenticates the data principal (an emailed one-time
+  // link, or an existing account session) and returns the principalId from
+  // that. It must never trust a client-supplied value: principalId is a
+  // database key, not a credential.
   const demoSessions = new Map();
+
+  app.use(express.json());
+
+  // Clearly-labelled demo sign-in, so the rest of the example is reachable.
+  // Exchange a contact detail for a token. A real deployment would send a
+  // one-time link to that address instead of returning a token here.
+  app.post("/demo/login", async (req, res) => {
+    const principal = await findPrincipalByContact({ models, email: req.body.email, phone: req.body.phone });
+    if (!principal) return res.status(404).json({ error: "no such principal - POST /consent first" });
+    const token = crypto.randomBytes(16).toString("hex");
+    demoSessions.set(token, principal.principalId);
+    res.json({ demoSessionToken: token, hint: "send this as the x-demo-session header" });
+  });
 
   app.use("/", createRouter({
     db,
     resolvePrincipal: (req) => demoSessions.get(req.get("x-demo-session")) ?? null,
     onWithdrawal: async ({ principalId, types }) => {
+      // Where a real deployment would tell its processors to stop and run its
+      // erasure pipeline. See erasePrincipalPII for the erasure primitive.
       console.log(`[demo] cease processing for ${principalId}: ${types.join(", ")}`);
     },
     onGrievanceFiled: async ({ refId }) => console.log(`[demo] notify the DPO about ${refId}`),
@@ -3334,6 +3730,8 @@ async function main() {
 main().catch((err) => { console.error("Failed to start:", err); process.exit(1); });
 ```
 
+Add a header comment to the file giving the end-to-end demo sequence: `POST /consent` to create a principal, `POST /demo/login` to get a token, then any authenticated route with `x-demo-session`.
+
 - [ ] **Step 4: Rewrite the README API sections**
 
 Every documented request and response must match the implementation exactly - the audit found four of the negotiating routes documented wrongly. Include: the new auth requirement and `resolvePrincipal`, the `denied` status, `regrant`, `receiptId` vs `docRef`, `dob` and parental consent, the read endpoints, the lifecycle functions, `onWithdrawal`/`onGrievanceFiled`, and `erasePrincipalPII`. Add a "Migrating from 0.1.0" section stating plainly that `principalId` values from 0.1.0 are email hashes and cannot be carried over.
@@ -3342,6 +3740,33 @@ Every documented request and response must match the implementation exactly - th
 
 Run: `npm test`
 Expected: every test file passes. Record the total count in the report.
+
+- [ ] **Step 5b: Verify `.env.example` is actually complete**
+
+Run and reconcile - the two lists must match exactly:
+
+```bash
+grep -rho 'process\.env\.[A-Z_]*' src/ examples/ | sed 's/.*process\.env\.//' | sort -u
+grep -o '^[A-Z_]*' .env.example | grep -v '^$' | sort -u
+```
+
+By the end of the branch the set is: `MONGO_URI`, `PRINCIPAL_ID_SECRET`, `FIDUCIARY_NAME`, `FIDUCIARY_DPO_NAME`, `FIDUCIARY_DPO_EMAIL`, `GRIEVANCE_SLA_DAYS`, `RIGHTS_SLA_DAYS`, `NOTICE_LANGUAGES`, `PORT`. Add anything missing.
+
+- [ ] **Step 5c: State M13's real status honestly**
+
+M13 ("install-from-git fails, and `require("dpdp-fiduciary-toolkit")` cannot resolve") is only *documented* by T1, not fixed - npm does not use `repository.directory` for install resolution, it is metadata for source links only. So after this branch, installing from the git URL still fails. Unlike H2 and M14, that was not flagged as a deliberate boundary.
+
+Add to the package README's "What this is not":
+
+```markdown
+- Not yet published to npm, and `npm install <git-url>` does not work, because
+  `package.json` lives in the `data-fiduciary-toolkit/` subdirectory rather than
+  at the repository root. Until it is published, vendor the `src/` directory or
+  add it as a path dependency. The `require("dpdp-fiduciary-toolkit")` in the
+  examples above is the name it will publish under.
+```
+
+And record it in the coverage note alongside H2 and M14 as closed-by-documentation rather than fixed.
 
 - [ ] **Step 6: Verify the packaged file list one more time**
 
