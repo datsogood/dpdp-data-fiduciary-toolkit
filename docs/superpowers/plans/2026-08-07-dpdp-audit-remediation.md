@@ -648,13 +648,17 @@ const { buildModels } = require("../src/models");
 
 test("connect returns an isolated connection, not the global mongoose default", async () => {
   const server = await MongoMemoryServer.create();
+  let conn;
   try {
-    const conn = await connect(server.getUri());
+    conn = await connect(server.getUri());
     assert.notEqual(conn, mongoose.connection, "must not be the global default connection");
     assert.equal(mongoose.connection.readyState, 0, "global default must stay disconnected");
     assert.equal(conn.readyState, 1);
-    await conn.close();
   } finally {
+    // Close in finally, not in the try: a failing assertion would otherwise
+    // leak the connection, and stopping the in-memory server does not close
+    // the client side.
+    if (conn) await conn.close();
     await server.stop();
   }
 });
@@ -662,13 +666,14 @@ test("connect returns an isolated connection, not the global mongoose default", 
 test("two connects to different URIs yield two independent connections", async () => {
   const a = await MongoMemoryServer.create();
   const b = await MongoMemoryServer.create();
+  let connA, connB;
   try {
-    const connA = await connect(a.getUri());
-    const connB = await connect(b.getUri());
+    connA = await connect(a.getUri());
+    connB = await connect(b.getUri());
     assert.notEqual(connA, connB, "a second connect must not silently return the first connection");
-    await connA.close();
-    await connB.close();
   } finally {
+    if (connA) await connA.close();
+    if (connB) await connB.close();
     await a.stop();
     await b.stop();
   }
@@ -676,13 +681,14 @@ test("two connects to different URIs yield two independent connections", async (
 
 test("sanitizeFilter is scoped to our connection and does not break a host app's queries", async () => {
   const server = await MongoMemoryServer.create();
+  let hostConn, ours;
   try {
     // A host application, using the global mongoose default connection.
-    const hostConn = await mongoose.createConnection(server.getUri()).asPromise();
+    hostConn = await mongoose.createConnection(server.getUri()).asPromise();
     const Host = hostConn.model("HostThing", new mongoose.Schema({ age: Number }));
     await Host.create([{ age: 10 }, { age: 20 }]);
 
-    const ours = await connect(server.getUri());
+    ours = await connect(server.getUri());
 
     // The host's legitimate operator query must still work.
     const found = await Host.find({ age: { $gt: 5 } });
@@ -696,22 +702,23 @@ test("sanitizeFilter is scoped to our connection and does not break a host app's
       "our own connection must sanitize operator filters"
     );
 
-    await ours.close();
-    await hostConn.close();
   } finally {
+    if (ours) await ours.close();
+    if (hostConn) await hostConn.close();
     await server.stop();
   }
 });
 
 test("buildModels binds models to the given connection and does not pollute the global registry", async () => {
   const server = await MongoMemoryServer.create();
+  let conn;
   try {
-    const conn = await connect(server.getUri());
+    conn = await connect(server.getUri());
     const models = buildModels(conn);
     assert.equal(models.ConsentRecord.db, conn);
     assert.ok(!mongoose.models.ConsentRecord, "global mongoose registry must stay clean");
-    await conn.close();
   } finally {
+    if (conn) await conn.close();
     await server.stop();
   }
 });
@@ -872,7 +879,7 @@ module.exports = { connect, buildModels, /* ...services, createRouter, config */
 Also rewrite `test/injection.test.js` to use the registry: delete its inline `modelsFor` helper and the `Schema` import, `require("../src/models")`, and call `buildModels(conn)`. Add `lawfulBasisKind: "consent"` and `receiptId: "RC-TEST"` to the seeded event so it satisfies the tightened schema.
 
 Run: `npm test`
-Expected: `test/connection.test.js` 3/3 PASS, `test/validate.test.js` 4/4 PASS, `test/injection.test.js` 1/1 PASS.
+Expected: `test/connection.test.js` 4/4 PASS, `test/validate.test.js` 4/4 PASS, `test/injection.test.js` 1/1 PASS.
 
 - [ ] **Step 9: Commit**
 
