@@ -11,6 +11,25 @@ const ALLOWED_S7_CLAUSES = [
   "Section 7(f)", "Section 7(g)", "Section 7(h)", "Section 7(i)",
 ];
 
+// Clauses a PRIVATE data fiduciary can actually rely on. Checked verbatim
+// against the statute text (two independent sources, same wording): 7(b) and
+// 7(c) are the only two sub-clauses that explicitly restrict the use to "the
+// State and/or its instrumentalities" - every other sub-clause is phrased
+// generically ("for taking measures to...", "for responding to...", "for
+// compliance with...") with no State-only language, so a private fiduciary
+// can invoke it. That includes 7(g) (public health measures during an
+// epidemic) and 7(h) (safety/assistance during a disaster or breakdown of
+// public order) - neither one is gated to government actors in the text, so
+// a private hospital or a private disaster-relief operator can rely on them
+// just as a private lender can rely on 7(d). Excluding them without a
+// textual basis would repeat the same class of error this task exists to
+// correct, just in the other direction - treating a private-capable clause
+// as State-only instead of a State-only clause as private-capable.
+const PRIVATE_FIDUCIARY_S7_CLAUSES = [
+  "Section 7(a)", "Section 7(d)", "Section 7(e)", "Section 7(f)",
+  "Section 7(g)", "Section 7(h)", "Section 7(i)",
+];
+
 test("no purpose claims contractual necessity as a lawful basis", () => {
   for (const entry of getCatalog()) {
     assert.doesNotMatch(
@@ -83,4 +102,40 @@ test("the erasure right is not described with a precondition the Act does not im
     /no longer needed/i,
     "the principal's request is the trigger; retention necessity is the fiduciary's exception to argue"
   );
+});
+
+test("a legitimate use cites a clause a private fiduciary can actually rely on", () => {
+  // ALLOWED_S7_CLAUSES only catches an invented letter - it accepts 7(b) and
+  // 7(c) too, which are real clauses but State-side ones, so it would not
+  // have caught kyc_reporting being reverted to 7(b). This is the stronger
+  // check: it fails for a real-but-inapplicable clause, not just a fake one.
+  for (const entry of getCatalog()) {
+    if (entry.lawfulBasis.kind !== "legitimate_use") continue;
+    assert.ok(
+      PRIVATE_FIDUCIARY_S7_CLAUSES.includes(entry.lawfulBasis.clause),
+      `${entry.type}: "${entry.lawfulBasis.clause}" is a real clause but not one a private ` +
+        `fiduciary can rely on - 7(b) and 7(c) are State-side grounds`
+    );
+  }
+});
+
+test("withdrawable is consistent with the basis kind for EVERY entry", () => {
+  for (const entry of getCatalog()) {
+    assert.equal(
+      entry.withdrawable,
+      entry.lawfulBasis.kind === "consent",
+      `${entry.type}: withdrawable must be true exactly when the basis is consent, got ` +
+        `withdrawable=${entry.withdrawable} for kind=${entry.lawfulBasis.kind}`
+    );
+  }
+});
+
+test("every entry declares prohibitedForChildren explicitly", () => {
+  for (const entry of getCatalog()) {
+    assert.equal(
+      typeof entry.prohibitedForChildren,
+      "boolean",
+      `${entry.type}: prohibitedForChildren must be an explicit boolean`
+    );
+  }
 });

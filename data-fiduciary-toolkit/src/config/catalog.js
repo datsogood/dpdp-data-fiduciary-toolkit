@@ -84,6 +84,7 @@ const CONSENT_CATALOG = [
     // continue the service - that is a commercial consequence, and it is not
     // a reason to refuse the withdrawal.
     withdrawable: true,
+    prohibitedForChildren: false,
     retentionMonths: 60,
   },
   {
@@ -92,6 +93,10 @@ const CONSENT_CATALOG = [
     purpose: "Telling you about products we think you will want.",
     lawfulBasis: { kind: "consent", clause: "Section 6", description: "Your consent" },
     withdrawable: true,
+    // Behavioural advertising to a child is exactly what Section 9 restricts
+    // - so this purpose must be an explicit false-by-decision, not a
+    // false-by-accident omission that Task 9's branching would silently trust.
+    prohibitedForChildren: true,
     retentionMonths: 24,
   },
   {
@@ -100,6 +105,9 @@ const CONSENT_CATALOG = [
     purpose: "Understanding how our product is used so we can improve it.",
     lawfulBasis: { kind: "consent", clause: "Section 6", description: "Your consent" },
     withdrawable: true,
+    // Same reasoning as marketing: profiling usage patterns is the kind of
+    // monitoring Section 9 keeps away from a child's data.
+    prohibitedForChildren: true,
     retentionMonths: 24,
   },
 ];
