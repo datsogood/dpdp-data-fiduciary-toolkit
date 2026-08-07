@@ -478,16 +478,40 @@ module.exports = { withDb };
 
 This is the regression test for C2. It must fail against the current code.
 
+Note: this test builds its model inline rather than via `buildModels`, which does not exist until T3. That keeps this commit green - T3 rewrites the two setup lines to use the registry.
+
 ```js
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { Schema } = require("mongoose");
 const { withDb } = require("./helpers/db");
-const { buildModels } = require("../src/models");
 const withdrawConsent = require("../src/services/withdrawConsent");
+
+// Built inline: buildModels() arrives in Task 3. T3 replaces this block.
+function modelsFor(conn) {
+  const eventSchema = new Schema(
+    { type: String, status: String, basis: String, timestamp: Date },
+    { _id: false }
+  );
+  const schema = new Schema({
+    principalId: { type: String, required: true, unique: true },
+    docRef: { type: String, required: true, unique: true },
+    events: { type: [eventSchema], default: [] },
+    updatedAt: Date,
+  });
+  schema.methods.currentState = function () {
+    const latest = {};
+    for (const e of this.events) {
+      if (!latest[e.type] || e.timestamp >= latest[e.type].timestamp) latest[e.type] = e;
+    }
+    return latest;
+  };
+  return { ConsentRecord: conn.model("ConsentRecord", schema) };
+}
 
 test("withdrawConsent rejects a NoSQL operator instead of matching an arbitrary principal", async () => {
   await withDb(async (conn) => {
-    const models = buildModels(conn);
+    const models = modelsFor(conn);
     const victimId = "b".repeat(64);
     await models.ConsentRecord.create({
       principalId: victimId,
@@ -514,7 +538,7 @@ test("withdrawConsent rejects a NoSQL operator instead of matching an arbitrary 
 - [ ] **Step 8: Run it to confirm it fails**
 
 Run: `npm test -- test/injection.test.js`
-Expected: FAIL - `buildModels` does not exist yet. **This is expected**: T3 introduces it. Note the failure in the report and proceed - Step 9 fixes the service, and the test goes green at the end of T3. Do not stub `buildModels` here.
+Expected: FAIL - `withdrawConsent` currently accepts the operator object, matches the victim record, and appends a `withdrawn` event, so the assertion that it rejects with status 400 fails. This is the C2 vulnerability reproducing. Step 9 fixes it and this commit must end green.
 
 - [ ] **Step 9: Add the guard to `withdrawConsent`**
 
@@ -531,7 +555,7 @@ async function withdrawConsent({ models, principalId, consentTypes } = {}) {
   ...
 ```
 
-Leave the rest of the function's behaviour alone - T7 rewrites it. The `models` parameter replaces the module-level model import and is introduced properly in T3; accept it here and fall back is **not** permitted, so this file will not run standalone until T3 lands.
+Leave the rest of the function's behaviour alone - T7 rewrites it. The `models` parameter replaces the module-level `require("../models/ConsentRecord")` import: delete that import and read `models.ConsentRecord` instead. Do not add a fallback to a global model - the whole point of T3 is that there is no global.
 
 - [ ] **Step 10: Add `sanitizeFilter` as defence in depth**
 
@@ -793,8 +817,10 @@ module.exports = { connect, buildModels, /* ...services, createRouter, config */
 
 - [ ] **Step 8: Run the tests**
 
+Also rewrite `test/injection.test.js` to use the registry: delete its inline `modelsFor` helper and the `Schema` import, `require("../src/models")`, and call `buildModels(conn)`. Add `lawfulBasisKind: "consent"` and `receiptId: "RC-TEST"` to the seeded event so it satisfies the tightened schema.
+
 Run: `npm test`
-Expected: `test/connection.test.js` 3/3 PASS, `test/validate.test.js` 4/4 PASS, `test/injection.test.js` 1/1 PASS (it goes green now that `buildModels` exists).
+Expected: `test/connection.test.js` 3/3 PASS, `test/validate.test.js` 4/4 PASS, `test/injection.test.js` 1/1 PASS.
 
 - [ ] **Step 9: Commit**
 
