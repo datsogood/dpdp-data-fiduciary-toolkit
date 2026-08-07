@@ -543,8 +543,20 @@ test("withdrawConsent rejects a NoSQL operator instead of matching an arbitrary 
 
 - [ ] **Step 8: Run it to confirm it fails**
 
+**Order matters here, and the obvious order does not work.** Before the model is injected, `withdrawConsent` resolves `ConsentRecord` from the global mongoose singleton, which the test harness deliberately never connects - so the malicious query never reaches a live database and you get a 10-second buffering timeout instead of the vulnerability. The red phase would prove nothing. This was hit for real during implementation.
+
+So do the mechanical refactor **first**, then the test:
+
+**Step 8a - inject the model, no behaviour change.** Add `models` as the first destructured parameter of `withdrawConsent` and delete the module-scope `require("../models/ConsentRecord")`, reading `models.ConsentRecord` instead. Change nothing else. The function is now injectable.
+
+**Step 8b - run the injection test.**
+
 Run: `node --test test/injection.test.js`
-Expected: FAIL - `withdrawConsent` currently accepts the operator object, matches the victim record, and appends a `withdrawn` event, so the assertion that it rejects with status 400 fails. This is the C2 vulnerability reproducing. Step 9 fixes it and this commit must end green.
+Expected: FAIL, and specifically **the vulnerability reproducing**: `{$gt: ""}` matches the victim record, `findOne` returns it, and a `withdrawn` event is appended to a ledger the caller had no right to touch. The assertion fails because the call *resolved* instead of rejecting, and the victim's `events.length` has grown to 2. If you see a buffering timeout instead, the model was not injected - stop and say so.
+
+**Step 8c - add the guard** (Step 9 below) and re-run. Green. This commit must end green.
+
+Do **not** connect the global default connection in `test/helpers/db.js` to make the original ordering work. That contradicts the harness's isolation, which is exactly what T3 establishes.
 
 - [ ] **Step 9: Add the guard to `withdrawConsent`**
 
@@ -910,6 +922,7 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
   - `findOrCreatePrincipal({ models, pii })` returns `{ principal, created }`.
   - `findPrincipalByContact({ models, email, phone })` returns the matching `Principal` document or `null`. **Read-only - it must never create or modify anything.** The router needs to know whether a principal exists *before* it writes, so that `POST /consent` can refuse an unauthenticated update instead of performing the write and then reporting 409 after the damage is done.
   - `findPrincipalById({ models, principalId })` returns the `Principal` or `null`, used by the authenticated update path so identity comes from the session rather than from supplied contact details.
+  - `updatePrincipalContact({ models, principalId, pii })` - the authenticated contact-correction path. Identity comes from `principalId`, never from the payload. Rejects with `409` if the new email or phone already belongs to another principal.
   - `erasePrincipalPII({ models, principalId })` from `src/services/erasure.js`.
 
 - [ ] **Step 1: Write the failing test `test/principal.test.js`**
@@ -921,7 +934,9 @@ const { withDb } = require("./helpers/db");
 
 process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
 const { buildModels } = require("../src/models");
-const { newPrincipalId, lookupHash, findOrCreatePrincipal } = require("../src/utils/principalId");
+const {
+  newPrincipalId, lookupHash, findOrCreatePrincipal, findPrincipalByContact, updatePrincipalContact,
+} = require("../src/utils/principalId");
 
 test("newPrincipalId is random, 64 hex chars, and never derived from input", () => {
   const a = newPrincipalId();
@@ -961,18 +976,52 @@ test("a principal can be registered by phone alone - no email required", async (
   });
 });
 
-test("correcting an email keeps the same principalId and does not orphan the record", async () => {
+test("two people sharing a phone can both register", async () => {
+  // The stated audience is beneficiaries who share a household handset, so
+  // "same phone" must not mean "same data principal".
   await withDb(async (conn) => {
     const models = buildModels(conn);
-    const first = await findOrCreatePrincipal({ models, pii: { name: "Asha", email: "old@example.com", phone: "9876543210" } });
-    const id = first.principal.principalId;
+    const mother = await findOrCreatePrincipal({ models, pii: { name: "Asha", email: "asha@example.com", phone: "9876543210" } });
+    const daughter = await findOrCreatePrincipal({ models, pii: { name: "Priya", email: "priya@example.com", phone: "9876543210" } });
 
-    // Same person, corrected email - matched on phone.
-    const second = await findOrCreatePrincipal({ models, pii: { name: "Asha", email: "new@example.com", phone: "9876543210" } });
-    assert.equal(second.created, false);
-    assert.equal(second.principal.principalId, id, "identity must survive an email correction");
-    assert.equal(second.principal.pii.email, "new@example.com");
+    assert.equal(daughter.created, true, "a second person on a shared phone must be able to register");
+    assert.notEqual(daughter.principal.principalId, mother.principal.principalId);
+    assert.equal(await models.Principal.countDocuments(), 2);
+  });
+});
+
+test("correcting an email keeps the same principalId, via the authenticated path", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principal } = await findOrCreatePrincipal({ models, pii: { name: "Asha", email: "old@example.com", phone: "9876543210" } });
+    const id = principal.principalId;
+
+    // Identity comes from the session, not from matching the payload against
+    // stored contact hashes.
+    const updated = await updatePrincipalContact({
+      models, principalId: id, pii: { email: "new@example.com" },
+    });
+    assert.equal(updated.principalId, id, "identity must survive an email correction");
+    assert.equal(updated.pii.email, "new@example.com");
+    assert.equal(updated.pii.name, "Asha", "unrelated fields must be preserved");
     assert.equal(await models.Principal.countDocuments(), 1, "must not create an orphan second record");
+
+    // The old email must no longer resolve to anyone.
+    assert.equal(await findPrincipalByContact({ models, email: "old@example.com" }), null);
+  });
+});
+
+test("a contact correction cannot steal another principal's email", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const a = await findOrCreatePrincipal({ models, pii: { name: "A", email: "a@example.com", phone: "1" } });
+    await findOrCreatePrincipal({ models, pii: { name: "B", email: "b@example.com", phone: "2" } });
+
+    await assert.rejects(
+      () => updatePrincipalContact({ models, principalId: a.principal.principalId, pii: { email: "b@example.com" } }),
+      (e) => e.status === 409,
+      "must refuse rather than silently merge two people's records"
+    );
   });
 });
 ```
@@ -1079,11 +1128,27 @@ function generateDocRef(prefix) {
 }
 
 /**
- * Finds an existing principal by email hash, then phone hash, and updates
- * their contact details; creates one if neither matches.
+ * SIGNUP path. Finds an existing principal by whichever contact detail is the
+ * stronger identifier, and creates one if there is no match.
  *
- * Matching on either hash is what lets a data principal correct their email
- * (a Section 12 right) without orphaning their consent history.
+ * Matching rule, and why it is not "either hash matches":
+ *
+ *   - email supplied -> match on emailHash ONLY.
+ *   - no email       -> match on phoneHash.
+ *
+ * A phone number is not a person. The stated audience is social and public
+ * sector beneficiaries, who routinely share one handset across a household, so
+ * "same phone" cannot mean "same data principal": if a mother registers with
+ * phone X and her daughter then registers a different email with phone X,
+ * matching on phone would either hand the daughter her mother's record or - once
+ * the router's existence check is in place - refuse to register the daughter at
+ * all. Neither is acceptable.
+ *
+ * That means a plain email correction is NOT inferred here (an email that
+ * matches nothing creates a new principal). Correcting an email is an
+ * authenticated operation - see updatePrincipalContact, which takes identity
+ * from the session rather than guessing it from the payload. That is the same
+ * principle as C1: never infer identity from caller-supplied contact details.
  */
 async function findOrCreatePrincipal({ models, pii }) {
   if (!pii || typeof pii !== "object") throw new AppError("pii is required", 400);
@@ -1096,11 +1161,11 @@ async function findOrCreatePrincipal({ models, pii }) {
   const emailHash = email ? lookupHash(email) : undefined;
   const phoneHash = phone ? lookupHash(phone) : undefined;
 
-  const or = [];
-  if (emailHash) or.push({ emailHash });
-  if (phoneHash) or.push({ phoneHash });
-
-  let principal = await models.Principal.findOne({ $or: or });
+  // Email is the stronger identifier. Fall back to phone only when there is no
+  // email at all - see the docstring on why a shared phone must not merge two
+  // people.
+  const filter = emailHash ? { emailHash } : { phoneHash };
+  let principal = await models.Principal.findOne(filter);
   const created = !principal;
 
   if (created) {
@@ -1126,11 +1191,49 @@ async function findOrCreatePrincipal({ models, pii }) {
  * address by the time the 409 was sent, which is the whole of the C1 attack.
  */
 async function findPrincipalByContact({ models, email, phone }) {
-  const or = [];
-  if (email && typeof email === "string") or.push({ emailHash: lookupHash(email) });
-  if (phone && typeof phone === "string") or.push({ phoneHash: lookupHash(phone) });
-  if (!or.length) return null;
-  return models.Principal.findOne({ $or: or });
+  // Must use the SAME matching rule as findOrCreatePrincipal, or the router's
+  // existence check and the service's lookup disagree: the router would 409 a
+  // person the service would have treated as new, or vice versa.
+  if (email && typeof email === "string") {
+    return models.Principal.findOne({ emailHash: lookupHash(email) });
+  }
+  if (phone && typeof phone === "string") {
+    return models.Principal.findOne({ phoneHash: lookupHash(phone) });
+  }
+  return null;
+}
+
+/**
+ * AUTHENTICATED contact correction. Identity comes from principalId - which the
+ * router takes from resolvePrincipal, never from the payload - so correcting an
+ * email cannot be used to reach another person's record.
+ *
+ * This is the path that satisfies the Section 12 right to correction without
+ * orphaning the consent history, and it is deliberately separate from signup:
+ * inferring "same person" from a shared phone number would merge two members of
+ * a household who share a handset.
+ */
+async function updatePrincipalContact({ models, principalId, pii }) {
+  assertPrincipalId(principalId);
+  if (!pii || typeof pii !== "object") throw new AppError("pii is required", 400);
+
+  const principal = await models.Principal.findOne({ principalId });
+  if (!principal) throw new AppError("No principal found for that id", 404);
+
+  // If the new contact detail already belongs to someone else, refuse rather
+  // than silently merging two people's records.
+  for (const [field, hashField] of [["email", "emailHash"], ["phone", "phoneHash"]]) {
+    if (!pii[field]) continue;
+    const hash = lookupHash(pii[field]);
+    const clash = await models.Principal.findOne({ [hashField]: hash, principalId: { $ne: principalId } });
+    if (clash) throw new AppError(`That ${field} is already registered to another data principal`, 409);
+    principal[hashField] = hash;
+  }
+
+  principal.pii = { ...(principal.pii ? principal.pii.toObject() : {}), ...pii };
+  principal.updatedAt = new Date();
+  await principal.save();
+  return principal;
 }
 
 async function findPrincipalById({ models, principalId }) {
@@ -1145,6 +1248,7 @@ module.exports = {
   findOrCreatePrincipal,
   findPrincipalByContact,
   findPrincipalById,
+  updatePrincipalContact,
 };
 ```
 
@@ -1168,6 +1272,16 @@ const { AppError } = require("../utils/errors");
  * person can never be re-identified from this system by email or phone.
  *
  * This is irreversible by design.
+ *
+ * KNOWN LIMIT, and it must stay documented rather than implied away: this
+ * clears the Principal document only. A data principal who typed their own
+ * name, email or address into the free-text body of a grievance, a rights
+ * request or a consent-manager request still has that text in those
+ * collections, and this function does not touch it. Redacting free text is a
+ * judgement call an automated pass gets wrong, so it is left to the
+ * fiduciary's own process - but a deployment that treats this function as
+ * completing a Section 12 erasure request, without also reviewing those three
+ * collections, has not completed it.
  */
 async function erasePrincipalPII({ models, principalId }) {
   assertPrincipalId(principalId);
@@ -2158,7 +2272,12 @@ function decide({ entry, current, chosen, consentSubmitted, regrant }) {
     if (current === "withdrawn") return regrant ? "granted" : null;
     return "granted"; // undefined or denied
   }
-  if (current === "granted") return "withdrawn";
+  // Omitting a non-withdrawable purpose must not withdraw it. No catalog this
+  // plan ships can reach here - every consent-based entry is withdrawable - but
+  // an adopter who hand-authors a consent-based, non-withdrawable purpose would
+  // otherwise find POST /consent silently withdrawing what withdrawConsent
+  // explicitly refuses to withdraw. Keep the two in agreement by construction.
+  if (current === "granted") return entry.withdrawable ? "withdrawn" : null;
   return current ? null : "denied";
 }
 
@@ -2717,6 +2836,21 @@ Persist `isMinor` and `parentalConsent` on the `Principal`.
 
 Run: `npm test`
 Expected: `test/children.test.js` 5/5 PASS, all previous green.
+
+- [ ] **Step 6b: Document what the gate deliberately does not do**
+
+`parentalConsent` is a **server-side parameter only**. No step wires it into `POST /consent`, into the router, or into any rendered form, and that is intentional: a child filling in their parent's name and a `verifiedAt` timestamp on a public form is not verifiable parental consent, it is a text box. The Rules require the check to be made against reliable details of identity, which this library has no way to perform.
+
+The consequence, which must be stated rather than left for someone to discover: **over HTTP, a minor cannot complete signup at all** - they receive the 422 and there is no field through which a parent's consent can be supplied. That is the correct conservative default for a reference implementation, but it is a gap, not a feature. Add to the package README's "What this is not":
+
+```markdown
+- No verifiable parental consent mechanism. The toolkit detects that a data
+  principal is under 18 and refuses to process their data, but it cannot verify
+  a parent's identity, so there is no HTTP path for a minor to be registered
+  even with genuine parental consent. An adopter serving minors must build that
+  verification and call `persistPIIwithconsent` with a `parentalConsent` object
+  from trusted server-side code. Do not expose that parameter to a form.
+```
 
 - [ ] **Step 7: Commit**
 
