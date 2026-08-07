@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-32chars";
 const { buildModels } = require("../src/models");
 const { findOrCreatePrincipal } = require("../src/utils/principalId");
 const { erasePrincipalPII } = require("../src/services/erasure");
@@ -25,9 +25,9 @@ test("erasure clears PII but preserves the consent ledger", async () => {
     await erasePrincipalPII({ models, principalId: id });
 
     const after = await models.Principal.findOne({ principalId: id });
-    assert.equal(after.pii.name, undefined);
-    assert.equal(after.pii.email, undefined);
+    assert.deepEqual(after.toObject().pii ?? {}, {}, "every pii field must be cleared");
     assert.equal(after.emailHash, undefined, "lookup hashes must go too, or the person stays re-identifiable");
+    assert.equal(after.phoneHash, undefined, "the phone hash re-identifies just as well as the email hash");
     assert.ok(after.erasedAt);
 
     const ledger = await models.ConsentRecord.findOne({ principalId: id });

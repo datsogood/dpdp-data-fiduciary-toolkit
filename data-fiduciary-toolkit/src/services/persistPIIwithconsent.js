@@ -48,7 +48,6 @@ async function persistPIIwithconsent({ models, pii, consentTypes = [], regrant }
     record = await models.ConsentRecord.create({
       principalId,
       docRef: generateDocRef("CN"),
-      pii,
       events,
       createdAt: now,
       updatedAt: now,

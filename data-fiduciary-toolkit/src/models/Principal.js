@@ -16,7 +16,13 @@ const { Schema } = require("mongoose");
  */
 const principalSchema = new Schema({
   principalId: { type: String, required: true, unique: true, index: true },
-  emailHash: { type: String, index: true, sparse: true },
+  // Unique: email is the stronger identifier, so two principals answering to
+  // the same emailHash would make findOne({ emailHash }) resolve to an
+  // arbitrary one of them. Sparse, so erased documents (which $unset this
+  // field) and phone-only principals (which never set it) don't collide.
+  emailHash: { type: String, index: true, unique: true, sparse: true },
+  // Deliberately NOT unique: a household shares one handset, so two
+  // legitimate principals sharing a phoneHash is normal, not a conflict.
   phoneHash: { type: String, index: true, sparse: true },
   pii: {
     name: String,

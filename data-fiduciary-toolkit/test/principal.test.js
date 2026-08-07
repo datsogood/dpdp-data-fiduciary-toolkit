@@ -2,11 +2,12 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
 
-process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production";
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-32chars";
 const { buildModels } = require("../src/models");
 const {
-  newPrincipalId, lookupHash, findOrCreatePrincipal, findPrincipalByContact, updatePrincipalContact,
+  newPrincipalId, lookupHash, findOrCreatePrincipal, findPrincipalByContact, findPrincipalById, updatePrincipalContact,
 } = require("../src/utils/principalId");
+const { erasePrincipalPII } = require("../src/services/erasure");
 
 test("newPrincipalId is random, 64 hex chars, and never derived from input", () => {
   const a = newPrincipalId();
@@ -92,5 +93,89 @@ test("a contact correction cannot steal another principal's email", async () => 
       (e) => e.status === 409,
       "must refuse rather than silently merge two people's records"
     );
+  });
+});
+
+test("resubmitting your own unchanged phone number does not 409 - a shared handset must not lock out corrections", async () => {
+  // phoneHash is deliberately non-unique, so a phone clash between two
+  // legitimate household members is not an error. Confirms the fix for the
+  // lockout the reviewer reproduced: correcting an unrelated field (name)
+  // while re-submitting the same phone must succeed, not 409.
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const mother = await findOrCreatePrincipal({ models, pii: { name: "Asha", email: "asha@example.com", phone: "5550001" } });
+    const daughter = await findOrCreatePrincipal({ models, pii: { name: "Priya", email: "priya@example.com", phone: "5550001" } });
+
+    const updated = await updatePrincipalContact({
+      models,
+      principalId: daughter.principal.principalId,
+      pii: { name: "Priya Updated", phone: "5550001" },
+    });
+    assert.equal(updated.pii.name, "Priya Updated");
+    assert.equal(updated.principalId, daughter.principal.principalId, "identity must not change");
+    assert.notEqual(updated.principalId, mother.principal.principalId);
+  });
+});
+
+test("two concurrent corrections claiming the same new email - exactly one wins", async () => {
+  // findOne-then-write is a check-then-act race: both calls can see "no clash"
+  // before either has saved. The unique index on emailHash is the backstop -
+  // this asserts the loser gets a clean 409, not a raw duplicate-key error,
+  // and that the database never ends up with two principals on one emailHash.
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const a = await findOrCreatePrincipal({ models, pii: { name: "A", phone: "111" } });
+    const b = await findOrCreatePrincipal({ models, pii: { name: "B", phone: "222" } });
+
+    const results = await Promise.allSettled([
+      updatePrincipalContact({ models, principalId: a.principal.principalId, pii: { email: "shared@example.com" } }),
+      updatePrincipalContact({ models, principalId: b.principal.principalId, pii: { email: "shared@example.com" } }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    assert.equal(fulfilled.length, 1, "exactly one of the two racing corrections must win");
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason.status, 409, "the loser must read as a clean conflict, not a raw Mongo error");
+
+    assert.equal(
+      await models.Principal.countDocuments({ emailHash: lookupHash("shared@example.com") }),
+      1,
+      "the database must never end up with two principals on one emailHash"
+    );
+  });
+});
+
+test("an erased principal's record cannot be written back to - erasure is terminal", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principal } = await findOrCreatePrincipal({
+      models,
+      pii: { name: "Asha", email: "asha@example.com", phone: "9876543210" },
+    });
+    const id = principal.principalId;
+    await erasePrincipalPII({ models, principalId: id });
+
+    await assert.rejects(
+      () => updatePrincipalContact({ models, principalId: id, pii: { name: "Asha Again" } }),
+      (e) => e.status === 409,
+      "a session issued before the erasure must not be able to write PII back onto the record"
+    );
+
+    const after = await models.Principal.findOne({ principalId: id });
+    assert.deepEqual(after.toObject().pii ?? {}, {}, "the rejected update must not have been applied");
+  });
+});
+
+test("findPrincipalById returns the principal for a known id and null for an unknown one", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principal } = await findOrCreatePrincipal({ models, pii: { name: "Asha", phone: "1" } });
+
+    const found = await findPrincipalById({ models, principalId: principal.principalId });
+    assert.equal(found.principalId, principal.principalId);
+
+    const unknown = await findPrincipalById({ models, principalId: newPrincipalId() });
+    assert.equal(unknown, null);
   });
 });
