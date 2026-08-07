@@ -19,6 +19,10 @@ function eventsFor(record, type) {
   return record.events.filter((e) => e.type === type);
 }
 
+// Guarantees two submissions land in different milliseconds, so an updatedAt
+// assertion is deterministic rather than a race against the clock.
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
 // ---------------------------------------------------------------------------
 // The state table. Each row of (current state, submitted) -> outcome gets a
 // test, because the rows that produce NO event are the whole point: an
@@ -150,6 +154,26 @@ test("a profile update that omits consentTypes does not silently withdraw a live
   });
 });
 
+test("consentTypes: null counts as omission, not as a decline of everything", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const first = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing", "analytics"] });
+    const principalId = first.principalId;
+    const before = (await models.ConsentRecord.findOne({ principalId })).events.length;
+
+    // A JSON body may legally carry "consentTypes": null, and a client that
+    // serialises an absent value as null rather than dropping the key must not
+    // thereby revoke every live optional consent. assertStringArray maps both
+    // undefined and null to [], so this is one token away from being a decline.
+    const after = await persistPIIwithconsent({ models, pii: PII, consentTypes: null });
+    assert.equal(after.events.length, 0, "null carries no consent decision, so it appends nothing");
+    assert.equal(statusOf(after.state, "marketing"), "granted");
+    assert.equal(statusOf(after.state, "analytics"), "granted");
+    assert.equal((await models.ConsentRecord.findOne({ principalId })).events.length, before,
+      "the ledger is append-only, so a null-shaped payload must not grow it");
+  });
+});
+
 test("an empty consentTypes array declines everything, which is not the same as omitting it", async () => {
   await withDb(async (conn) => {
     const models = buildModels(conn);
@@ -276,6 +300,8 @@ test("withdrawing an already-withdrawn purpose is a no-op, not a duplicate event
     assert.deepEqual(second.withdrawn, []);
     assert.deepEqual(second.noChange, ["marketing"]);
     assert.equal(first.effectiveFrom.getTime() <= Date.now(), true);
+    assert.equal(second.effectiveFrom, null,
+      "a no-op must not report a moment a revocation took effect - nothing took effect");
   });
 });
 
@@ -341,12 +367,84 @@ test("each submission gets its own receipt id, distinct from the record ref", as
   });
 });
 
-test("two concurrent first submissions leave one ledger holding one event per purpose", async () => {
+test("a notice-only submission moves updatedAt; a submission that changes nothing does not", async () => {
   await withDb(async (conn) => {
     const models = buildModels(conn);
+    const first = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    const principalId = first.principalId;
+    const baseline = (await models.ConsentRecord.findOne({ principalId })).updatedAt;
+
+    await tick();
+    await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    assert.deepEqual((await models.ConsentRecord.findOne({ principalId })).updatedAt, baseline,
+      "a submission that changes nothing must not touch the record at all");
+
+    await tick();
+    await persistPIIwithconsent({
+      models, pii: PII, consentTypes: ["marketing"],
+      notice: { version: "2026-08-01", language: "en" },
+    });
+    const afterNotice = (await models.ConsentRecord.findOne({ principalId })).updatedAt;
+    assert.ok(afterNotice > baseline,
+      "refreshing the notice snapshot is a modification of the record, so updatedAt must move");
+  });
+});
+
+test("the create-race recovery recomputes against the winner instead of replaying", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const winner = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    const principalId = winner.principalId;
+    const stored = await models.ConsentRecord.findOne({ principalId });
+    assert.deepEqual([...new Set(stored.events.map((e) => e.receiptId))], [winner.receiptId]);
+
+    // Force the losing interleaving rather than hoping the event loop provides
+    // it: the next submission's read misses the record, exactly as it would if
+    // the winner had not committed yet, so its insert collides on the unique
+    // principalId index and the recovery path is the only way through.
+    const realFindOne = models.ConsentRecord.findOne.bind(models.ConsentRecord);
+    let forcedMisses = 0;
+    models.ConsentRecord.findOne = (...args) => {
+      if (forcedMisses === 0) {
+        forcedMisses += 1;
+        return Promise.resolve(null);
+      }
+      // The recovery's own re-read must see the truth. The patch lives on a
+      // model bound to this test's throwaway connection, so it cannot leak.
+      return realFindOne(...args);
+    };
+    let loser;
+    try {
+      loser = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    } finally {
+      models.ConsentRecord.findOne = realFindOne;
+    }
+
+    assert.equal(forcedMisses, 1, "the forced miss must have been consumed, or no collision was provoked");
+    assert.equal(loser.events.length, 0, "the delta recomputed against the winner is empty");
+    assert.equal(loser.docRef, winner.docRef, "the loser reports the surviving ref, not the one it discarded");
+    assert.notEqual(loser.receiptId, winner.receiptId);
+
+    assert.equal(await models.ConsentRecord.countDocuments({ principalId }), 1);
+    const after = await models.ConsentRecord.findOne({ principalId });
+    assert.equal(after.events.length, stored.events.length, "a replay would have doubled the ledger");
+    assert.deepEqual([...new Set(after.events.map((e) => e.receiptId))], [winner.receiptId],
+      "the loser's receipt must appear nowhere in the ledger - it appended nothing");
+  });
+});
+
+test("two concurrent first submissions cannot create two ledgers for one principal", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    // End-to-end companion to the forced-collision test above, and deliberately
+    // weaker: it proves that two genuinely concurrent submissions cannot leave
+    // two ledgers or a doubled event, which also confirms the unique index is
+    // built by the time the write happens. It does NOT pin the recovery - if the
+    // two calls ever serialise, every assertion below still holds because the
+    // second call simply finds the first's record. The recovery itself is pinned
+    // deterministically above, by forcing the missed read.
+    //
     // Create the principal up front so both calls agree on the principalId.
-    // The race under test is two writers racing to create the SAME principal's
-    // consent record, which is the one that can duplicate an append-only ledger.
     const { principal } = await findOrCreatePrincipal({ models, pii: PII });
     const principalId = principal.principalId;
 
@@ -361,9 +459,9 @@ test("two concurrent first submissions leave one ledger holding one event per pu
     const record = await models.ConsentRecord.findOne({ principalId });
     for (const entry of getCatalog()) {
       assert.equal(eventsFor(record, entry.type).length, 1,
-        `${entry.type}: the recovery must recompute the delta, not replay events computed against an empty state`);
+        `${entry.type}: one event per purpose, however the two writers interleaved`);
     }
     assert.equal(a.events.length + b.events.length, getCatalog().length,
-      "the winner reports its events and the loser reports the empty delta it actually applied");
+      "between them the two calls report exactly the events that were appended");
   });
 });

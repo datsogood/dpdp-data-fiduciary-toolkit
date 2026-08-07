@@ -24,7 +24,14 @@ const { AppError } = require("../utils/errors");
 async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice } = {}) {
   // Omitting consentTypes and submitting [] are different acts: the first is
   // "no consent decision was made", the second is "I decline everything".
-  const consentSubmitted = consentTypes !== undefined;
+  //
+  // null must count as omission, not as a decline. assertStringArray maps both
+  // undefined and null to [], so treating null as a submission would walk the
+  // granted-plus-absent row for every live optional purpose and withdraw it - and
+  // a JSON body may legally carry "consentTypes": null, which is how a client
+  // that serialises an absent value rather than dropping the key would revoke
+  // every consent it had. The ledger is append-only, so that is unrecoverable.
+  const consentSubmitted = consentTypes !== undefined && consentTypes !== null;
   const chosen = assertStringArray(consentTypes, "consentTypes");
 
   const unknown = chosen.filter((t) => !getValidConsentTypes().includes(t));
@@ -86,6 +93,11 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
   let newEvents = decideFor(record.currentState());
   if (newEvents.length) {
     record.events.push(...newEvents);
+  }
+  // Refreshing the notice snapshot is a modification of the record too, so it
+  // moves updatedAt even when no consent changed. A submission that changes
+  // neither leaves the document untouched.
+  if (newEvents.length || notice) {
     record.updatedAt = now;
   }
   snapshotNotice(record);
@@ -106,6 +118,8 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     newEvents = decideFor(record.currentState());
     if (newEvents.length) {
       record.events.push(...newEvents);
+    }
+    if (newEvents.length || notice) {
       record.updatedAt = now;
     }
     // The notice snapshot was set on the losing document and would otherwise be

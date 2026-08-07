@@ -19,6 +19,7 @@ const { AppError } = require("../utils/errors");
  * @param {string[]} input.consentTypes   - purposes to withdraw
  * @param {Function} [input.onWithdrawal] - called once, only if something changed
  * @returns {Promise<{ docRef, receiptId, withdrawn, rejected, noChange, effectiveFrom }>}
+ *          effectiveFrom is null when withdrawn is empty.
  */
 async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal } = {}) {
   assertPrincipalId(principalId);
@@ -79,7 +80,16 @@ async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal
     }
   }
 
-  return { docRef: record.docRef, receiptId, withdrawn, rejected, noChange, effectiveFrom: now };
+  return {
+    docRef: record.docRef,
+    receiptId,
+    withdrawn,
+    rejected,
+    noChange,
+    // null when nothing was withdrawn: reporting a moment for a revocation that
+    // did not happen would have a host act on nothing.
+    effectiveFrom: withdrawn.length ? now : null,
+  };
 }
 
 module.exports = withdrawConsent;
