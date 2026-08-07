@@ -2,6 +2,30 @@ const { getCatalog, getValidConsentTypes } = require("../config/catalog");
 const { findOrCreatePrincipal, generateDocRef } = require("../utils/principalId");
 const { assertStringArray } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
+const { ageInYears, ADULT_AGE } = require("../utils/age");
+
+/**
+ * Verifiable parental consent, as far as this library can check it: a named
+ * parent or guardian, contact details, a stated relationship, and the moment
+ * the fiduciary verified it. This is NOT identity verification - the library
+ * has no way to confirm that whoever passed these details is telling the
+ * truth. It exists so a caller who has already done that verification
+ * through its own trusted process has a shape to record the result in.
+ *
+ * `parentalConsent` is a server-side parameter only. Nothing wires it into a
+ * route or a form - a child typing a parent's name and a verifiedAt
+ * timestamp into a public form is not verifiable parental consent, it is a
+ * text box. See the README's "What this is not" for the consequence.
+ */
+function isVerifiedParentalConsent(parentalConsent) {
+  if (!parentalConsent || typeof parentalConsent !== "object") return false;
+  const { name, email, relationship, verifiedAt } = parentalConsent;
+  if (typeof name !== "string" || !name.trim()) return false;
+  if (typeof email !== "string" || !email.trim()) return false;
+  if (typeof relationship !== "string" || !relationship.trim()) return false;
+  const t = verifiedAt instanceof Date ? verifiedAt : new Date(verifiedAt);
+  return !Number.isNaN(t.getTime());
+}
 
 /**
  * Records a data principal's consent decisions.
@@ -13,15 +37,23 @@ const { AppError } = require("../utils/errors");
  * that represent a real change - and reversing a withdrawal requires the
  * caller to say so explicitly with regrant: true.
  *
+ * pii.dob is required - an age gate cannot exist without it - and it runs
+ * before any write, so a minor rejected for want of parental consent leaves
+ * no Principal and no ConsentRecord behind. A minor with verifiable parental
+ * consent still never gets a purpose the catalog marks prohibitedForChildren:
+ * parental consent does not unlock behavioural advertising or tracking aimed
+ * at a child.
+ *
  * @param {object}   input
  * @param {object}   input.models
- * @param {object}   input.pii            - { name, email?, phone?, dob?, pan?, address? }
- * @param {string[]} [input.consentTypes] - omit entirely for a PII-only update
- * @param {boolean}  [input.regrant]      - allow reversing a prior withdrawal
- * @param {object}   [input.notice]       - Section 5 notice snapshot (Task 8)
- * @returns {Promise<{ docRef, receiptId, principalId, created, events, state }>}
+ * @param {object}   input.pii              - { name, email?, phone?, dob, pan?, address? }
+ * @param {string[]} [input.consentTypes]   - omit entirely for a PII-only update
+ * @param {boolean}  [input.regrant]        - allow reversing a prior withdrawal
+ * @param {object}   [input.notice]         - Section 5 notice snapshot (Task 8)
+ * @param {object}   [input.parentalConsent] - { name, email, relationship, verifiedAt } - server-side only, see above
+ * @returns {Promise<{ docRef, receiptId, principalId, created, events, state, refusedForChild }>}
  */
-async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice } = {}) {
+async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, parentalConsent } = {}) {
   // Omitting consentTypes and submitting [] are different acts: the first is
   // "no consent decision was made", the second is "I decline everything".
   //
@@ -37,8 +69,29 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
   const unknown = chosen.filter((t) => !getValidConsentTypes().includes(t));
   if (unknown.length) throw new AppError(`Unknown consent type(s): ${unknown.join(", ")}`, 400);
 
+  // The age gate runs before any write - findOrCreatePrincipal included - so
+  // a rejected minor leaves no Principal and no ConsentRecord behind.
+  const age = ageInYears(pii && pii.dob);
+  if (age === null) {
+    throw new AppError(
+      "pii.dob is required and must be a valid date - the Act requires a child's data to be treated differently, which cannot be done without it",
+      400
+    );
+  }
+  const isMinor = age < ADULT_AGE;
+  if (isMinor && !isVerifiedParentalConsent(parentalConsent)) {
+    throw new AppError("Verifiable parental consent is required before processing a child's personal data", 422);
+  }
+
   const { principal, created } = await findOrCreatePrincipal({ models, pii });
   const principalId = principal.principalId;
+
+  // Persist the determination and the parental consent record (if any) on
+  // the principal's identity document, not on the append-only ledger.
+  principal.isMinor = isMinor;
+  if (parentalConsent) principal.parentalConsent = parentalConsent;
+  await principal.save();
+
   const now = new Date();
   // One receipt per submission. The docRef identifies the record and stays put
   // for the life of the principal; the receiptId identifies this act, and every
@@ -52,7 +105,15 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
    */
   const decideFor = (state) => {
     const events = [];
+    const refused = [];
     for (const entry of getCatalog()) {
+      // Parental consent unlocks nothing here: behavioural advertising and
+      // tracking aimed at a child are refused outright, not merely
+      // un-consented, and no event is written for them at all.
+      if (isMinor && entry.prohibitedForChildren) {
+        refused.push(entry.type);
+        continue;
+      }
       const current = state[entry.type] ? state[entry.type].status : undefined;
       const target = decide({ entry, current, chosen, consentSubmitted, regrant });
       if (!target || target === current) continue;
@@ -65,7 +126,7 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
         timestamp: now,
       });
     }
-    return events;
+    return { events, refused };
   };
 
   // Task 8 replaces this with the full notice snapshot. Keep it in one place so
@@ -90,7 +151,7 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     });
   }
 
-  let newEvents = decideFor(record.currentState());
+  let { events: newEvents, refused: refusedForChild } = decideFor(record.currentState());
   if (newEvents.length) {
     record.events.push(...newEvents);
   }
@@ -115,7 +176,7 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     if (!winner) throw err;
 
     record = winner;
-    newEvents = decideFor(record.currentState());
+    ({ events: newEvents, refused: refusedForChild } = decideFor(record.currentState()));
     if (newEvents.length) {
       record.events.push(...newEvents);
     }
@@ -137,6 +198,9 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     // when the save above lost the create race.
     events: newEvents,
     state: record.currentState(),
+    // Purposes prohibited for a minor - recomputed alongside newEvents, so it
+    // stays truthful under the same create-race recovery.
+    refusedForChild,
   };
 }
 

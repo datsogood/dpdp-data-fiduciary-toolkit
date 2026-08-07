@@ -32,6 +32,20 @@ const principalSchema = new Schema({
     pan: String,
     address: String,
   },
+  // Set by persistPIIwithconsent's age gate from pii.dob at the time of that
+  // call - Section 9 of the Act requires a child's data to be treated
+  // differently, so this determination has to live somewhere the rest of the
+  // toolkit can trust rather than being recomputed ad hoc.
+  isMinor: { type: Boolean },
+  // Server-side only: no route or form accepts this field. A child typing a
+  // parent's name and a verifiedAt timestamp into a public form is not
+  // verifiable parental consent - see the README's "What this is not".
+  parentalConsent: {
+    name: String,
+    email: String,
+    relationship: String,
+    verifiedAt: Date,
+  },
   erasedAt: { type: Date, default: null },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },

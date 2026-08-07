@@ -165,3 +165,9 @@ POST /consent-manager
 - The consent ledger records three states per purpose: `granted`, `denied`
   (offered and declined), and `withdrawn` (previously granted, then revoked).
   A purpose that was never offered has no event at all.
+- No verifiable parental consent mechanism. The toolkit detects that a data
+  principal is under 18 and refuses to process their data, but it cannot verify
+  a parent's identity, so there is no HTTP path for a minor to be registered
+  even with genuine parental consent. An adopter serving minors must build that
+  verification and call `persistPIIwithconsent` with a `parentalConsent` object
+  from trusted server-side code. Do not expose that parameter to a form.

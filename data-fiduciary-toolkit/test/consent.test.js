@@ -185,7 +185,7 @@ test("an empty consentTypes array declines everything, which is not the same as 
     // Omitting the field records no consent decision at all, so nothing that
     // depends on consent appears in this principal's ledger.
     const omitted = await persistPIIwithconsent({
-      models, pii: { name: "Bhavna", email: "bhavna@example.com", phone: "9000000000" },
+      models, pii: { name: "Bhavna", email: "bhavna@example.com", phone: "9000000000", dob: "1990-04-01" },
     });
     assert.equal(statusOf(omitted.state, "marketing"), undefined,
       "omitting consentTypes must not record a decision the principal never made");
