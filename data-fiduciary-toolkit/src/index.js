@@ -6,7 +6,6 @@ const { listRights, exerciseRight } = require("./services/dataPrincipalRights");
 const { complaintToTheBoard, escalateToBoard } = require("./services/complaintToTheBoard");
 const consentManagerRequest = require("./services/consentManagerRequest");
 const createRouter = require("./http/router");
-const { derivePrincipalId } = require("./utils/principalId");
 const { CONSENT_CATALOG, RIGHTS_CATALOG, FIDUCIARY } = require("./config/catalog");
 
 module.exports = {
@@ -21,7 +20,6 @@ module.exports = {
   complaintToTheBoard,
   escalateToBoard,
   consentManagerRequest,
-  derivePrincipalId,
   // Express router with all five APIs pre-wired.
   createRouter,
   // Config, exposed for introspection / building your own UI against it.

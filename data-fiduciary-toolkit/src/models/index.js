@@ -1,3 +1,4 @@
+const Principal = require("./Principal");
 const ConsentRecord = require("./ConsentRecord");
 const RightsRequest = require("./RightsRequest");
 const Grievance = require("./Grievance");
@@ -15,6 +16,7 @@ function buildModels(connection) {
   if (connection.$dpdpModels) return connection.$dpdpModels;
 
   const models = {
+    Principal: Principal.build(connection),
     ConsentRecord: ConsentRecord.build(connection),
     RightsRequest: RightsRequest.build(connection),
     Grievance: Grievance.build(connection),

@@ -41,7 +41,6 @@ async function persistPIIwithconsent({ models, pii, consentTypes = [], regrant }
   if (record) {
     // Returning principal confirming choices again — append new events,
     // keep the original docRef and PII record, update contact details.
-    record.pii = { ...record.pii, ...pii };
     record.events.push(...events);
     record.updatedAt = now;
     await record.save();
