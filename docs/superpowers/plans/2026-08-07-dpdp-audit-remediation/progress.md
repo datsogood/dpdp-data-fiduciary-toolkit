@@ -1,0 +1,302 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-08-07-dpdp-audit-remediation.md
+
+Branch: fix/dpdp-audit-remediation
+Isolation: dedicated feature branch in the primary working directory (not main).
+Pre-flight scan: one conflict found and fixed in the plan before Task 1 — T2 originally
+committed a test that could only pass after T3. Rewritten so T2 builds its model inline
+and ends green; T3 swaps it to buildModels. No remaining plan self-contradictions.
+
+Tasks: 14. Findings: 43 (C1-C4, H1-H12, M1-M15, L1-L12).
+
+Task 1: complete (commits db6a65d..3dad92c, review approved)
+Task 1: minor (deferred): pre-existing em dashes in README "five APIs" section - T14 territory
+Task 1: PLAN-MANDATED findings raised, awaiting human ruling:
+  T1 Step 2/6 wrote docs describing behaviour that lands in T4/T7/T12:
+   (a) README "principalId is a random opaque identifier keyed with PRINCIPAL_ID_SECRET"
+       - false until T4; src/utils/principalId.js still does sha256(email)
+   (b) README three-state ledger granted/denied/withdrawn - false until T7; enum is 2-state
+   (c) README quickstart wires createRouter({db, resolvePrincipal}) as "Required"
+       - createRouter() takes zero params until T5
+   (d) .env.example "toolkit refuses to start if DPO email is the placeholder" - false until T12
+  Also confirmed: README:85 and 5 examples still say principalId is sha256(email),
+  contradicting the new bullet. T14 owns rewriting that section.
+Task 1: PLAN-MANDATED ruling: human chose "accept forward-referencing docs" - branch lands
+  as one PR, T14 re-syncs the README. No change to T1. Findings recorded, not fixed.
+
+PLAN REVISION 1 (after adversarial plan review: 26 defects survived, 47 refuted)
+  Verified by execution before accepting:
+   - `node --test test/` FAILS (phantom failing test); bare `node --test` works. CRITICAL.
+   - mongoose.set("sanitizeFilter",true) makes a HOST app's {$gt:5} query throw CastError.
+     connection.set(...) is correctly scoped: host unaffected, library sanitized.
+     Per-query .setOptions({sanitizeFilter:true}) is silently INERT - reviewer's alt fix wrong.
+   - DPDP s.7(b) is the State subsidy clause, NOT legal obligation. s.7(d) is disclosure-to-State
+     only. Section 7 has no general legal-obligation ground for a private fiduciary.
+  Plan changes made:
+   - test script -> "node --test"; all per-file runs -> `node --test test/x.test.js`
+   - sanitizeFilter moved to connection.set() in T3; global set deleted from T2/T3; new test
+   - T6: kyc split into kyc_reporting (7(d), non-withdrawable) + identity_verification
+     (consent, withdrawable); clause allow-list test replaces /^Section 7/ prefix
+   - T4: added read-only findPrincipalByContact + findPrincipalById
+   - T5: 409 must be checked BEFORE any write; PUT /consent added for authenticated update
+     (regrant was unreachable); identity from req.principalId never from payload (403 on
+     cross-principal); await resolvePrincipal; body normalisation (single checkbox string,
+     consentSubmitted signal, flat<->nested pii); POST /consent/withdraw added; error mapper
+     moved here from T12 with 5xx no-leak + CastError->400; 3 services' throws -> AppError
+   - T7: E11000 recovery recomputes the delta and re-applies the notice instead of replaying
+   - T8: buildNotice wired into POST /consent; notice gains personalData/withdrawal/
+     boardComplaint; NOTICE_LANGUAGES added to .env.example
+   - T11: resolution field added to Grievance; "escalated" removed from GRIEVANCE_TRANSITIONS;
+     null-safe re-escalation guard; RIGHTS_SLA_DAYS added to .env.example
+   - T13: forms actually submitted in tests; single-checkbox case covered
+   - T14: example gains POST /demo/login so authenticated routes are reachable; M13 stated
+     honestly as documented-not-fixed; .env.example completeness check
+  EXECUTION ORDER CHANGED (task numbers stable): 1,2,3,4,6,7,9,5,8,10,11,12,13,14
+    T5 moved after T7/T9 - its POST /consent tests cannot pass while the consent service is
+    mid-refactor between T3 and T7.
+Task 1: fix round 1/5 (1 addressed, 0 open - npm test script; commits 3dad92c..669db77)
+Task 1: re-review ADJUDICATED BY CONTROLLER rather than dispatched. Reasoning: the fix diff is
+  a single line in package.json ("node --test test/" -> "node --test"), I read it in full, it
+  matches the value the revised plan specifies verbatim, and I had already verified bare
+  `node --test` empirically before raising the finding. Implementer reported `npm test` ->
+  tests 0 / fail 0 / exit 0 in the pre-Task-2 state. No code path, no logic, nothing a fresh
+  reviewer could add. Recorded here rather than silently skipped.
+Task 1: complete (commits db6a65d..669db77, review approved + 1 fix round)
+
+Task 2: NEEDS_CONTEXT at first dispatch, resolved. Implementer found the brief's TDD order
+  unworkable: pre-fix withdrawConsent resolves ConsentRecord from the global mongoose
+  singleton, which the harness never connects, so the malicious query hit a 10s buffering
+  timeout instead of reproducing the vulnerability. Ruled: resequence within the task -
+  inject `models` first (mechanical, no behaviour change), THEN run the red phase (which now
+  genuinely reproduces C2: operator matches the victim and appends an event), THEN add the
+  guard. Rejected the alternative of connecting the global default in the test helper, which
+  would contradict the isolation T3 establishes. Plan corrected at T2 Step 8.
+
+  NOTE ON THE REVIEW PROCESS: the adversarial plan review DID raise this, twice -
+  "(coverage) F20: Task 2's injection test cannot reproduce C2, so the stated expected failure
+  is wrong" and "(tests) F6: the documented red-phase reason is wrong". My refutation pass
+  killed both. The implementer then proved them correct by execution. So the refuter
+  over-refuted on at least these two, and refuted findings are not safe to discard
+  unexamined - worth weighting when reading the remaining 47 refutations.
+
+PLAN REVISION 2 - re-examined the 47 refuted plan-review findings after the refuter was shown
+  to have over-refuted on Task 2. Judged each of the substantive-looking ones myself:
+   - design F8 (router broken in transit), design F13 (requireAuth does not check existence):
+     refutations HOLD. Transitional state; host contract. No change.
+   - design F1 (shared phone): refuted on the WRONG AXIS. The refuter checked only the attack
+     path and correctly found the 409 blocks it, but never checked the legitimate path: mother
+     registers with shared phone X, daughter registers a different email with phone X,
+     findPrincipalByContact matches phoneHash, daughter gets 409 and CANNOT REGISTER. Real
+     functional defect for the stated audience. FIXED: signup matches on emailHash only when an
+     email is supplied, phoneHash only when there is none; email correction moves to a new
+     authenticated updatePrincipalContact() taking identity from the session, which also
+     removes an identity-inference path in the spirit of C1. Two new tests: shared-phone
+     registration, and refusing to steal another principal's email (409).
+   - design F17 (decide() ignores withdrawable): refutation technically holds for the shipped
+     catalog, but it is a footgun for adopters. FIXED defensively - one line, decide() now
+     returns null instead of "withdrawn" for a non-withdrawable purpose, so POST /consent and
+     withdrawConsent agree by construction rather than by catalog coincidence.
+   - design F15 (erasure leaves PII in request free-text): out of scope of any reviews.md
+     finding, as the refuter said, but the JSDoc claim was loose. FIXED as documentation: an
+     explicit KNOWN LIMIT block stating that a deployment treating this as a complete Section 12
+     erasure, without reviewing the three request collections, has not completed it.
+  Re-examined the four refuted LEGAL findings (they bear on T7/T9, both imminent):
+   - DPDP-05 (ledger retention after erasure has no legal basis): refutation HOLDS. It cites
+     verified Rule 8(3) - a minimum one-year retention of personal data and processing logs -
+     which is the "compliance with any law" limb of s.8(7). Retained artefact carries no PII.
+   - DPDP-06 (parental consent self-declared): refutation HOLDS on the mechanism - parentalConsent
+     is never wired to HTTP or any form, so a minor cannot supply it; it is a server-side
+     parameter like resolvePrincipal. BUT the refutation surfaces a real gap it did not name:
+     a minor with a genuinely consenting parent therefore cannot register over HTTP at all.
+     Not expanding scope (H4 does not ask for identity verification) - added T9 Step 6b
+     requiring this be stated in the README as a limitation, plus an explicit warning never to
+     expose parentalConsent to a form.
+   - DPDP-08 (legitimate uses recorded as "granted" asserts consent): refutation HOLDS. The
+     required lawfulBasisKind field sits alongside status on every event and is surfaced by
+     getConsentState, so the ledger records authorisation and names the non-consent basis.
+   - DPDP-10 (mandatory dob over-collects): refutation HOLDS. reviews.md H4 itself prescribes
+     "dob (or an age band)", every plan fixture already carries dob, and in the worked example
+     (a lender) dob is collected anyway.
+  Net: the refuter was right on 4 of 4 legal findings and wrong on 2 test-sequencing findings
+  plus the axis of 1 design finding. Refutations are useful but not authoritative.
+
+CONTROLLER ERROR, corrected: I ran `git add -A` for my own plan-doc commits while the Task 2
+  implementer had uncommitted work in the same working tree. That swept its source files and
+  tests into commits a53f705 and 57ef186 under docs: messages. The implementer correctly
+  reported "nothing to commit" and did not touch history itself. Fixed by soft-resetting to
+  669db77 and recommitting by path: docs separately (2beb36d), all Task 2 code under its
+  proper fix: message (b67b548). Tests re-verified 6/6 after the rewrite, tree clean.
+  LESSON for the remaining 12 tasks: never `git add -A` while an implementer is live. Stage by
+  explicit path, or commit only between dispatches.
+  Cosmetic residue accepted: 6c2261d and 2beb36d share a subject line. Both bodies are
+  accurate and they are separated by a code commit. Not worth a second history rewrite.
+Task 2: implementer DONE_WITH_CONCERNS (concern was the commit collision above, now resolved)
+Task 2: 6/6 tests pass, output pristine. TDD evidence shows all three states with the red
+  phase reproducing the real vulnerability (operator matched victim, events 1 -> 2).
+Task 2: task review APPROVED, spec compliant. Reviewer independently confirmed the red phase
+  reproduced the real vulnerability (resolved-instead-of-rejected + victim docRef matched +
+  events 1->2), not a timeout. No Critical, no Important.
+Task 2: minor (deferred): withdrawConsent.js:32 loops the raw `consentTypes` param rather than
+  the `types` value returned by assertStringArray. Behaviourally identical today; would matter
+  only if assertStringArray ever sanitizes rather than validates. T7 rewrites this whole file -
+  carry the pointer there.
+Task 2: minor (deferred): no test exercises the new maxlength caps at the Mongoose validation
+  layer. Brief specified no test for Step 11. Candidate for T14's suite completion.
+Task 2: complete (commits 2beb36d..b67b548, review approved)
+Task 3: task review APPROVED, spec compliant. Reviewer independently confirmed connect() leaves
+  mongoose.connection at readyState 0, zero occurrences of mongoose.set( in the diff, all four
+  models converted, buildModels idempotent, all six services threaded, no global fallback.
+Task 3: PLAN-MANDATED finding handled without a fix round, deliberately: the T3 connection tests
+  call conn.close() inside try rather than finally, so a failing assertion leaks the connection.
+  Copied verbatim from my plan, so it is my defect not the implementer's. Practical impact is
+  ~zero (single node --test process, handles reaped at exit) and the reviewer itself graded it
+  borderline Important/Minor with "no action needed from the implementer". Handled two ways
+  instead of a fix round: (1) the PLAN is corrected so the pattern cannot propagate into the
+  ten remaining tasks, (2) the existing instance is deferred to T14's suite pass. Not dismissed.
+Task 3: minor (deferred): existing conn.close()-in-try instances in test/connection.test.js -> T14
+Task 3: minor (deferred): buildModels attaches $dpdpModels to any duck-typed connection, incl. one
+  a host passes in. Low risk, mechanism specified by the plan. -> note in T14 docs
+Task 3: complete (commits b67b548..8a76f1e, review approved)
+Task 4: implementer DONE, 19/19. Both judgement questions answered empirically (mongoose 8.24
+  auto-inits a bare nested path to {} so the toObject guard is defensive not load-bearing;
+  phoneHash/emailHash confirmed sparse-not-unique against a real index listing).
+Task 4: task review (opus) - all 9 security properties VERIFIED, incl. erasure confirmed at the
+  raw-document level ($unset, not set-to-null, so nothing survives on disk). No Critical.
+  4 Important, 3 reproduced empirically by the reviewer:
+   1. PLAN-MANDATED: the phone clash check 409s a principal resubmitting their OWN unchanged
+      phone when another principal shares it. Directly contradicts the shared-handset design
+      that phoneHash-non-unique exists to serve, and would lock the stated audience out of the
+      s.12 correction right once T5 wires a profile-update endpoint. MY plan defect - the brief
+      mandated a two-field clash loop while the same brief argued phone clashes are legitimate.
+      Not asked of the human because the fix RESOLVES a self-contradiction in the plan rather
+      than contradicting it: email-only uniqueness is what the plan's own rationale requires.
+   2. Check-then-act race: two concurrent updates claiming one email both fulfilled,
+      countDocuments(emailHash) = 2. Fix: unique+sparse on emailHash, catch 11000 -> 409.
+   3. Erasure not terminal: update-after-erase writes PII back, leaving erasedAt set AND live
+      PII, re-identifiable again. Fix: reject 409 when erasedAt is set.
+   4. PLAN-MANDATED: erasure test asserts 3 of 8 cleared fields; phoneHash unasserted, so
+      deleting that line leaves the suite green. Adding assertions contradicts nothing.
+  Plan corrected for 1, 2, 3 and 4 before dispatching. Fix round 1 sent to the implementer.
+Task 4: fix round 1/5 dispatched (4 Important + 3 minors: secret() entropy floor,
+  findPrincipalById coverage, symmetrical dead-code removal)
+Task 4: fix round 1/5 (4 addressed, 0 open; commits cec9aa2..7d8c5e7). Re-review verified each
+  new test would genuinely fail if its property broke - incl. confirming the concurrency test
+  exercises real interleaving (its RED mode "both fulfilled" is only reachable if both clash
+  checks passed before either save committed).
+Task 4: Principal.init() addition ACCEPTED on the merits. Reviewer confirmed nothing in the
+  codebase awaited index-build completion before this, so the race window was open in
+  PRODUCTION indefinitely, not just in tests. Placement per-call is not ideal; buildModels is
+  the natural choke point but is sync and called sync in all 23 tests, so making it async was
+  out of this round's mandate.
+Task 4: minor (deferred) -> T5/T14: hoist a single `await models.Principal.init()` into the
+  startup path once buildModels has an async entry point; per-call guards then become
+  redundant-but-harmless.
+Task 4: minor (deferred): the erasedAt guard is read-then-act, so a correction racing a
+  concurrent erasure could still reach "erasedAt set AND live PII" via a different pair of calls
+  than the one tested. Narrow. -> flag in T14 docs as an erasure-atomicity limitation.
+Task 4: minor (deferred): secret() now requires >=32 chars - operational note for anyone with an
+  existing shorter PRINCIPAL_ID_SECRET. .env.example already says `openssl rand -hex 32` (64 chars).
+Task 4: minor (deferred): pre-existing em dashes in src/index.js and persistPIIwithconsent.js
+  comments -> T7 rewrites the latter, T14 the former.
+Task 4: complete (commits 638fd58..7d8c5e7, review approved + 1 fix round)
+Task 6: implementer DONE, 30/30. Caught a real bug in my brief: assert.notMatch does not exist
+  in Node's assert module (verified: require('assert').notMatch === undefined); used
+  assert.doesNotMatch. Plan corrected globally.
+Task 6: task review APPROVED. Reviewer independently checked EVERY clause citation against the
+  statute text: kyc_reporting/7(d) correct for the PMLA disclosure limb, identity_verification
+  correctly consent-based as wider than that duty, underwriting's GDPR contractual-necessity
+  basis gone, no entry cites 7(b) or 7(c), erasure wording fixed for L5. Also independently
+  confirmed no pre-existing test depended on entry.basis/entry.required, and grepped the tree
+  to confirm only the two Task 7 files still reference the deleted fields.
+  Controller resolved the reviewer's one cannot-verify item: checked `git log -1 4721d1d`
+  directly, both required trailers present and exact.
+Task 6: 2 Important, both PLAN-MANDATED test-coverage gaps in MY brief, both fixed in the plan
+  and dispatched as fix round 1 (not asked of the human - strengthening a test contradicts
+  nothing the plan intends, and finding 2 was self-disclosed by the implementer):
+   1. ALLOWED_S7_CLAUSES accepts any of the 9 real letters, so reverting kyc_reporting to the
+      wrong-but-real "Section 7(b)" would still pass. Protection came only from a separate
+      dedicated test that exists by luck of that entry being named. Added a second list of
+      clauses a PRIVATE fiduciary can actually rely on (7(a),(d),(e),(f),(i)) - 7(b)/7(c) are
+      State-side. Asked the implementer to push back if my letter list is wrong.
+   2. No generic invariant ties withdrawable to lawfulBasis.kind, so marketing/analytics are
+      unasserted and a future edit could silently make one non-withdrawable. Added a loop.
+   3. Minor, fixed now not deferred: prohibitedForChildren was on 2 of 5 entries (my brief's
+      asymmetry). Normalised to all five + a test that every entry declares it explicitly,
+      since T9 branches on it and omission-reads-as-false is not a decision.
+  Fix round instructed to prove each new test fails against a deliberately broken catalog
+  before keeping it - finding 1 exists precisely because one of my tests could not fail.
+Task 6: fix round 1/5 dispatched
+Task 6: fix round 1 - implementer PUSHED BACK on my PRIVATE_FIDUCIARY_S7_CLAUSES list and was
+  CORRECT. I had excluded 7(g) and 7(h). Verified against the statute text: 7(g) ("measures to
+  provide medical treatment or health services ... during an epidemic, outbreak of disease, or
+  any other threat to public health") and 7(h) ("measures to ensure safety of, or provide
+  assistance or services to, any individual during any disaster, or any breakdown of public
+  order") carry NO State restriction - a private hospital can rely on 7(g), a private relief
+  organisation on 7(h). Only 7(b) and 7(c) are State-limited. Plan corrected to the
+  implementer's list. This is the second time asking an implementer to argue rather than encode
+  a guess has caught an error of mine.
+Task 6: fix round 1/5 (3 addressed, 0 open; commits 4721d1d..d9d91f4). Re-review verified the
+  clause list matches 7(a),(d),(e),(f),(g),(h),(i) exactly and reasoned independently that all
+  three new tests would genuinely fail on a deliberate break. Diff purely additive.
+Task 6: minor (deferred): ALLOWED_S7_CLAUSES is now redundant alongside the narrower
+  PRIVATE_FIDUCIARY_S7_CLAUSES test. Harmless; pruning not requested. -> T14 if tidying.
+Task 6: minor (deferred): withdrawable is enforced at test time, not derived in the catalog
+  itself. Implementer's own point, out of scope for the findings. -> note in T14 docs.
+Task 6: complete (commits 7d8c5e7..d9d91f4, review approved + 1 fix round)
+Task 7: implementer DONE_WITH_CONCERNS, 53/53 (33 pre-existing + 20 new). Verified the state
+  table by killing 12 single-line mutants of decide(); added tests for rows 4, 5, 8 and the
+  withdrawable guard, which my brief had left untested. Dropped my $dpdpNewEvents hack for
+  inline closures. Found TWO defects in my brief:
+   - withdrawConsent(["marketing","marketing"]) appended two withdrawn events to an append-only
+     ledger. Deduplicated with a test. Plan corrected.
+   - my test secret "test-secret-not-for-production" is 30 chars, under T4's 32-char floor.
+     Plan corrected globally to a 41-char value.
+Task 7: task review (opus) - all 8 state-table rows CORRECT and each pinned by a non-vacuous
+  test; reviewer spot-checked the mutation claims and confirmed they are not padding; recovery
+  genuinely recomputes against the winner; decision logic in exactly one place; ConsentRecord
+  .init() judged justified not cargo-culted (traced principalId unique:true, so E11000 needs a
+  built index); M3 confirmed not regressed. 1 Important blocker:
+   - consentTypes: null reinstates C3. consentSubmitted = (consentTypes !== undefined) is TRUE
+     for null, and assertStringArray maps null to [], so null walks the granted+absent row and
+     withdraws every live optional consent. Unrecoverable on an append-only ledger. Not
+     exploitable today (no HTTP caller until T5) but escalates to Critical the moment T5 passes
+     a body through, and the defence belongs at the service boundary. The two services also
+     disagreed: withdrawConsent already 400s on null.
+  Plan corrected + fix round 1 dispatched with 3 minors (updatedAt on notice-only change,
+  effectiveFrom on a no-op withdrawal, race test can silently degrade to a no-op).
+Task 7: NAMED FOLLOW-UP (not deferred-and-forgotten): concurrent writes to an ALREADY EXISTING
+  ConsentRecord append duplicate same-status events. Reviewer walked the adversarial
+  interleavings and confirmed currentState() is correct in every one, so it is ledger noise not
+  state corruption, and strictly better than the pre-change behaviour. Real fix is optimistic
+  concurrency (__v guard + retry) on ConsentRecord, which also makes concurrent PII-only updates
+  throw VersionError. Owner: post-branch, or T14 if it can be done without destabilising.
+Task 7: fix round 1/5 dispatched
+Task 7: fix round 1/5 (4 addressed, 0 open; commits 2b9596e..d1de99e). Implementer improved on
+  my instructions twice: found the SAME updatedAt nesting bug in the recovery path (fixing only
+  the first attempt would have left the two paths disagreeing), and replaced my timing-dependent
+  race test with a CONSTRUCTED one that stubs findOne to miss once, forcing the E11000 so the
+  recovery is the only route through. Re-review judged that legitimate fault injection at the
+  right seam, not a mock testing itself - every downstream step runs against real Mongo and the
+  assertions check persisted state. Killed by two distinct mutants.
+Task 7: null probe confirmed worse than the review described - pre-fix, consentTypes: null
+  revoked THREE live consents at once (underwriting, marketing, analytics).
+Task 7: minor (deferred) -> T14: `created` in the persistPIIwithconsent return value names the
+  Principal, not the ConsentRecord. Ambiguous; rename.
+Task 7: minor (deferred/accepted): withdrawConsent 400s on consentTypes: null while
+  persistPIIwithconsent treats null as omission. Intentional asymmetry - withdrawal has no
+  "no decision" semantics to fall back to. Document in T14 rather than unify.
+Task 7: minor (deferred): suite runtime now ~25s, driven by MongoMemoryServer instances per
+  test file. Watch it; consider a shared server in T14 if it keeps growing.
+Task 7: complete (commits a202e92..d1de99e, review approved + 1 fix round)
+BASELINE VERIFIED after my own tooling error: 56/56 pass, 25.3s, warm cache.
+  CONTROLLER ERROR: I let three foreground `npm test` runs time out into the background, giving
+  12 concurrent node --test processes (one per test file per run) fighting for CPU and ports.
+  The suite looked like it had slowed 25s -> 196s. My pkill then killed 5 test files mid-run,
+  producing a "23 tests, 18 pass, 0 fail" result that looked like breakage but was my cleanup.
+  Nothing was wrong with the code. Rule added: always run the suite with run_in_background,
+  never let it time out into the background, and never pkill without checking what is mine.
+REAL DEFECT found underneath it, now assigned to T14 Step 4b: on a COLD mongod binary cache the
+  suite genuinely fails - 3 of 56, each the first test in its file, each ~11ms, racing for
+  ~/.cache/mongodb-binaries/<ver>.lock. A fresh clone's first `npm test` fails and the second
+  passes. Fix: pretest binary warm-up + pinned mongod version + a
+  `rm -rf ~/.cache/mongodb-binaries && npm test` verification. Also measure the 8s -> 25s
+  runtime growth rather than leaving it unmeasured.

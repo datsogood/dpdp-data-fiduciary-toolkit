@@ -20,8 +20,8 @@ npm test
 ```
 
 See [`data-fiduciary-toolkit/README.md`](data-fiduciary-toolkit/README.md) for
-the API, and [`reviews.md`](reviews.md) for the audit this codebase was
-remediated against.
+the API, and [the audit](docs/superpowers/plans/2026-08-07-dpdp-audit-remediation/spec.md) this
+codebase was remediated against.
 
 ## License
 

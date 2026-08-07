@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Remediate all 43 findings in `reviews.md` - 4 critical, 12 high, 15 medium, 12 low - turning the toolkit from a write-only reference sketch into an authenticated, readable, legally-coherent DPDP implementation with a real test suite.
+**Goal:** Remediate all 43 findings in [`spec.md`](spec.md) - 4 critical, 12 high, 15 medium, 12 low - turning the toolkit from a write-only reference sketch into an authenticated, readable, legally-coherent DPDP implementation with a real test suite.
 
 **Architecture:** Four structural changes carry most of the fixes. (1) Identity splits from PII: a random `principalId` on a new `Principal` document that holds erasable PII, with the append-only `ConsentRecord` ledger keyed by that id and holding no PII - this makes erasure and audit retention independently satisfiable. (2) Authentication becomes an injected `resolvePrincipal(req)` hook that the router requires, defaulting to deny, so `principalId` is never read from a request body. (3) The library owns an isolated mongoose connection with a per-connection model registry instead of hijacking the global singleton. (4) Consent writes become non-destructive: the service computes the delta against current state and only appends events that represent a real change, with a three-state event enum and a per-transaction receipt.
 
@@ -24,7 +24,7 @@
   Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K
   ```
 - **Working directory:** all paths below are relative to `data-fiduciary-toolkit/` unless prefixed with `repo-root:`.
-- **Finding IDs** (`C1`, `H5`, `M12`, `L3` ...) refer to `repo-root:reviews.md`. Every task lists the findings it closes; a task is not complete until each listed finding is actually addressed.
+- **Finding IDs** (`C1`, `H5`, `M12`, `L3` ...) refer to [`spec.md`](spec.md) beside this plan. Every task lists the findings it closes; a task is not complete until each listed finding is actually addressed.
 
 ---
 
@@ -293,8 +293,8 @@ npm test
 ```
 
 See [`data-fiduciary-toolkit/README.md`](data-fiduciary-toolkit/README.md) for
-the API, and [`reviews.md`](reviews.md) for the audit this codebase was
-remediated against.
+the API, and [the audit](docs/superpowers/plans/2026-08-07-dpdp-audit-remediation/spec.md) this
+codebase was remediated against.
 
 ## License
 
@@ -312,7 +312,7 @@ Expected: the file list contains only `src/`, `README.md`, `LICENSE`, `package.j
 git add -A
 git commit -m "chore: fix packaging, license, and statute citations
 
-Closes H12, M12, M13, L1, L4, L7, L9, L10, L12 from reviews.md.
+Closes H12, M12, M13, L1, L4, L7, L9, L10, L12 from spec.md.
 
 - add .gitignore (no .env or node_modules could be ignored before)
 - add .env.example with all six env vars the code reads
@@ -4096,7 +4096,7 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
 
 ## Self-Review
 
-**Spec coverage** - every finding in `reviews.md` maps to a task:
+**Spec coverage** - every finding in `spec.md` maps to a task:
 
 | Task | Findings closed |
 | --- | --- |
