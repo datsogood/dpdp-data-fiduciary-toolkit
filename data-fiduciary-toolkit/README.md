@@ -1,13 +1,15 @@
 # dpdp-fiduciary-toolkit
 
 A reference implementation of a data fiduciary's obligations under India's
-Digital Personal Data Protection Act, 2025 (DPDP Act): capturing consent,
+Digital Personal Data Protection Act, 2023 (DPDP Act): capturing consent,
 honouring withdrawal, letting a data principal exercise their rights, routing
 grievances, and handing off to a Consent Manager.
 
 The following is a summary of all the responsibilities of a data fiduciary (the organization collecting PII data) towards a data principal (the user) that we intend to codify as part of this toolkit - 
 
-1. Consent needs to provided clearly to the Data Principal - across all languages.
+1. Consent must be requested through a clear, plain-language notice, and the
+   data principal must be able to read that notice in English or in any
+   language listed in the Eighth Schedule to the Constitution.
 2. Information to be provided to the Data Principal on the personal data collected, purpose for collection and how data will be processed.
 3. Information to be provided to the Data Principal on how consent can be revoked, their rights can be exercised and complaints to the board can be raise.
 4. Ease of consent withdrawal by a Data Principal should be the same as accepting consent.
@@ -19,7 +21,13 @@ The following is a summary of all the responsibilities of a data fiduciary (the 
 10. Prior collected personal data needs to be erased on revocation of consent. Data processor (3rd party data processing entity, if any) should also be intimated on the erasure of data.
 11. Data Protection Officer contact should be provided and be valid at all times.
 12. Consent from parents are required when personal data is collected, concerning children.
-13. A signficant data fiduciary is one that has a huge public impact on the nature of the personal data that they're collecting. They should appoint a DPO and an independent data auditor. Periodic data protection impact assessment and audit needs to be performed.
+13. A Significant Data Fiduciary is one the Central Government notifies as
+    such, based on factors including the volume and sensitivity of personal
+    data processed and the risk to data principals - it is a notification,
+    not a threshold an organisation self-assesses. An SDF must appoint a
+    Data Protection Officer based in India, appoint an independent data
+    auditor, and carry out periodic data protection impact assessments and
+    audits.
 
 
 We're in the process of creating APIs that encapsulate the obligations above so that each data fiduciary can adhere to the DPDP act completely and with ease.
@@ -29,18 +37,29 @@ We're in the process of creating APIs that encapsulate the obligations above so 
 
 ```bash
 npm install
-cp .env.example .env   # set MONGO_URI and your org's identity
+cp .env.example .env   # then set MONGO_URI and PRINCIPAL_ID_SECRET
 ```
 
 ```js
-const { connect, createRouter } = require("dpdp-fiduciary-toolkit");
 const express = require("express");
+const { connect, createRouter } = require("dpdp-fiduciary-toolkit");
 
-await connect(process.env.MONGO_URI);
-const app = express();
-app.use("/", createRouter());
-app.listen(4000);
+async function main() {
+  const db = await connect(process.env.MONGO_URI);
+
+  const app = express();
+  app.use("/dpdp", createRouter({
+    db,
+    // Required. Return the authenticated principal's id, or null.
+    resolvePrincipal: (req) => req.session?.principalId ?? null,
+  }));
+  app.listen(4000);
+}
+
+main().catch((err) => { console.error(err); process.exit(1); });
 ```
+
+`express` is a peer dependency - install it in your own project.
 
 Or run the bundled example: `npm run example` (needs a Mongo instance at
 `MONGO_URI`).
@@ -138,3 +157,11 @@ POST /consent-manager
   example (a fictional lender, "Kavach Finance") — replace them with your
   own purposes, retention periods, and DPO details before using this for
   real.
+- `principalId` is a random opaque identifier, not a hash of anything. Earlier
+  versions derived it from the data principal's email, which made it guessable
+  by anyone who knew the address. Lookup hashes are keyed with
+  `PRINCIPAL_ID_SECRET`, so they are pseudonymous - and pseudonymous data is
+  still personal data under the Act.
+- The consent ledger records three states per purpose: `granted`, `denied`
+  (offered and declined), and `withdrawn` (previously granted, then revoked).
+  A purpose that was never offered has no event at all.
