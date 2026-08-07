@@ -1059,7 +1059,13 @@ const { Schema } = require("mongoose");
  */
 const principalSchema = new Schema({
   principalId: { type: String, required: true, unique: true, index: true },
-  emailHash: { type: String, index: true, sparse: true },
+  // emailHash is unique: it is the primary signup identifier, and without a
+  // unique index a check-then-act race puts two principals on one hash, after
+  // which findOne({emailHash}) resolves to an arbitrary one of them. Sparse, so
+  // erased records - whose hashes are unset - can coexist in any number.
+  emailHash: { type: String, index: true, sparse: true, unique: true },
+  // phoneHash is deliberately NOT unique. A household shares one handset, so two
+  // data principals legitimately have the same phone hash.
   phoneHash: { type: String, index: true, sparse: true },
   pii: {
     name: String,
@@ -1227,14 +1233,30 @@ async function updatePrincipalContact({ models, principalId, pii }) {
   const principal = await models.Principal.findOne({ principalId });
   if (!principal) throw new AppError("No principal found for that id", 404);
 
-  // If the new contact detail already belongs to someone else, refuse rather
-  // than silently merging two people's records.
-  for (const [field, hashField] of [["email", "emailHash"], ["phone", "phoneHash"]]) {
-    if (!pii[field]) continue;
-    const hash = lookupHash(pii[field]);
-    const clash = await models.Principal.findOne({ [hashField]: hash, principalId: { $ne: principalId } });
-    if (clash) throw new AppError(`That ${field} is already registered to another data principal`, 409);
-    principal[hashField] = hash;
+  // Erasure is terminal. Without this, an authenticated caller - or anyone
+  // holding a session issued before the erasure - can write PII straight back
+  // onto an erased record, leaving a document that claims erasedAt while
+  // holding live PII and is re-identifiable by contact hash again. That is the
+  // worst possible artefact to hand a regulator.
+  if (principal.erasedAt) {
+    throw new AppError("This data principal's record has been erased and cannot be updated", 409);
+  }
+
+  // Email uniqueness only. phoneHash is deliberately non-unique because a
+  // household shares a handset, so a phone clash is NOT an error - and checking
+  // it would 409 a beneficiary merely for resubmitting their own unchanged
+  // phone number, locking the stated audience out of the Section 12 correction
+  // right entirely.
+  if (pii.phone) principal.phoneHash = lookupHash(pii.phone);
+
+  if (pii.email) {
+    const hash = lookupHash(pii.email);
+    // Resubmitting your own unchanged email is never a clash.
+    if (principal.emailHash !== hash) {
+      const clash = await models.Principal.findOne({ emailHash: hash, principalId: { $ne: principalId } });
+      if (clash) throw new AppError("That email is already registered to another data principal", 409);
+      principal.emailHash = hash;
+    }
   }
 
   principal.pii = { ...(principal.pii ? principal.pii.toObject() : {}), ...pii };
@@ -1341,9 +1363,12 @@ test("erasure clears PII but preserves the consent ledger", async () => {
     await erasePrincipalPII({ models, principalId: id });
 
     const after = await models.Principal.findOne({ principalId: id });
-    assert.equal(after.pii.name, undefined);
-    assert.equal(after.pii.email, undefined);
+    // Assert EVERY field erasure clears. Asserting only a couple means deleting
+    // the phoneHash line - half of what makes erasure non-cosmetic - leaves the
+    // whole suite green.
+    assert.deepEqual(after.toObject().pii ?? {}, {}, "every pii field must be cleared");
     assert.equal(after.emailHash, undefined, "lookup hashes must go too, or the person stays re-identifiable");
+    assert.equal(after.phoneHash, undefined, "the phone hash re-identifies just as well as the email hash");
     assert.ok(after.erasedAt);
 
     const ledger = await models.ConsentRecord.findOne({ principalId: id });
@@ -1773,6 +1798,24 @@ const { getCatalog, getValidConsentTypes, getWithdrawableTypes, RIGHTS_CATALOG }
 // legitimate use must cite one of these exactly. A prefix check like
 // /^Section 7/ would bless "Section 7(b)" for a private lender's KYC, which is
 // the State subsidy clause - so pin the enumeration instead.
+// Clauses a PRIVATE data fiduciary can actually rely on. Verified clause by
+// clause against the statute text: only 7(b) ("for the State and any of its
+// instrumentalities to provide or issue ... subsidy, benefit, service,
+// certificate, licence or permit") and 7(c) ("for the performance by the State
+// or any of its instrumentalities of any function under any law") are restricted
+// to the State. Every other clause is open to a private fiduciary - 7(g) covers
+// a private healthcare provider during an epidemic and 7(h) a private relief
+// organisation during a disaster, neither of which is State-limited in the text.
+//
+// This list exists because membership in ALLOWED_S7_CLAUSES is not enough: 7(b)
+// is a real clause, so an allow-list of all nine letters would happily bless
+// "Section 7(b)" for a private lender's KYC - which is the exact error H1 was
+// raised for, and which an earlier draft of this plan actually made.
+const PRIVATE_FIDUCIARY_S7_CLAUSES = [
+  "Section 7(a)", "Section 7(d)", "Section 7(e)", "Section 7(f)",
+  "Section 7(g)", "Section 7(h)", "Section 7(i)",
+];
+
 const ALLOWED_S7_CLAUSES = [
   "Section 7(a)", "Section 7(b)", "Section 7(c)", "Section 7(d)", "Section 7(e)",
   "Section 7(f)", "Section 7(g)", "Section 7(h)", "Section 7(i)",
@@ -1780,7 +1823,7 @@ const ALLOWED_S7_CLAUSES = [
 
 test("no purpose claims contractual necessity as a lawful basis", () => {
   for (const entry of getCatalog()) {
-    assert.notMatch(
+    assert.doesNotMatch(
       entry.lawfulBasis.description,
       /contract/i,
       `${entry.type}: the Act has no contractual-necessity ground - use consent or a cited legitimate use`
@@ -1795,6 +1838,21 @@ test("no purpose claims contractual necessity as a lawful basis", () => {
   }
 });
 
+test("a legitimate use cites a clause a private fiduciary can actually rely on", () => {
+  // Membership in ALLOWED_S7_CLAUSES is only a floor - it catches an invented
+  // letter. It cannot catch a real-but-inapplicable one, which is the error that
+  // actually happened: an earlier draft cited 7(b), the State subsidy clause,
+  // for a private lender's KYC.
+  for (const entry of getCatalog()) {
+    if (entry.lawfulBasis.kind !== "legitimate_use") continue;
+    assert.ok(
+      PRIVATE_FIDUCIARY_S7_CLAUSES.includes(entry.lawfulBasis.clause),
+      `${entry.type}: "${entry.lawfulBasis.clause}" is a real clause but not one a private ` +
+        `fiduciary can rely on - 7(b) and 7(c) are State-side grounds`
+    );
+  }
+});
+
 test("no legitimate use claims a general compliance-with-legal-obligation ground", () => {
   // Section 7 contains no such ground for a private fiduciary. 7(d) is confined
   // to disclosure obligations owed to the State, so a description asserting a
@@ -1805,6 +1863,34 @@ test("no legitimate use claims a general compliance-with-legal-obligation ground
       entry.lawfulBasis.description,
       /compliance with a legal obligation/i,
       `${entry.type}: no such ground exists - cite what the clause actually authorises`
+    );
+  }
+});
+
+test("withdrawable is consistent with the basis kind for EVERY entry", () => {
+  // A generic invariant, not per-entry spot checks. Without this, a future edit
+  // setting marketing.withdrawable = false while its kind stays "consent" would
+  // pass every other test in this file - and silently refuse a withdrawal the
+  // Act guarantees, which is the whole defect H1 was raised for.
+  for (const entry of getCatalog()) {
+    assert.equal(
+      entry.withdrawable,
+      entry.lawfulBasis.kind === "consent",
+      `${entry.type}: withdrawable must be true exactly when the basis is consent, got ` +
+        `withdrawable=${entry.withdrawable} for kind=${entry.lawfulBasis.kind}`
+    );
+  }
+});
+
+test("every entry declares prohibitedForChildren explicitly", () => {
+  // Task 9 branches on this. An entry that merely omits it reads as false by
+  // accident rather than by decision, which is not good enough for a flag whose
+  // job is to keep behavioural advertising away from a child.
+  for (const entry of getCatalog()) {
+    assert.equal(
+      typeof entry.prohibitedForChildren,
+      "boolean",
+      `${entry.type}: prohibitedForChildren must be an explicit boolean`
     );
   }
 });
@@ -1942,6 +2028,7 @@ const CONSENT_CATALOG = [
     purpose: "Telling you about products we think you will want.",
     lawfulBasis: { kind: "consent", clause: "Section 6", description: "Your consent" },
     withdrawable: true,
+    prohibitedForChildren: true,
     retentionMonths: 24,
   },
   {
@@ -1950,6 +2037,7 @@ const CONSENT_CATALOG = [
     purpose: "Understanding how our product is used so we can improve it.",
     lawfulBasis: { kind: "consent", clause: "Section 6", description: "Your consent" },
     withdrawable: true,
+    prohibitedForChildren: true,
     retentionMonths: 24,
   },
 ];
@@ -2714,7 +2802,7 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
 
 - [ ] **Step 1: Add the flag to the catalog**
 
-`marketing` and `analytics` gain `prohibitedForChildren: true`. `kyc_reporting`, `identity_verification` and `underwriting` get `false` (T6 already sets it on the first two).
+T6 already sets `prohibitedForChildren` on every entry (`marketing` and `analytics` true, the rest false) and a catalog test asserts every entry declares it explicitly. Verify that is still the case and move on - there is nothing to add here.
 
 - [ ] **Step 2: Write the failing test `test/children.test.js`**
 
