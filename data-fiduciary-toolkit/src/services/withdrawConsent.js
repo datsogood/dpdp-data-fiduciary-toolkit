@@ -1,5 +1,6 @@
-const ConsentRecord = require("../models/ConsentRecord");
 const { CONSENT_CATALOG, REQUIRED_CONSENT_TYPES, VALID_CONSENT_TYPES } = require("../config/catalog");
+const { assertPrincipalId, assertStringArray } = require("../utils/validate");
+const { AppError } = require("../utils/errors");
 
 const basisByType = Object.fromEntries(CONSENT_CATALOG.map((c) => [c.type, c.basis]));
 
@@ -11,15 +12,17 @@ const basisByType = Object.fromEntries(CONSENT_CATALOG.map((c) => [c.type, c.bas
  * active; attempting to do so is reported back rather than silently ignored.
  *
  * @param {object} input
+ * @param {object} input.models - model registry, must include ConsentRecord
  * @param {string} input.principalId
  * @param {string[]} input.consentTypes - purposes to withdraw
  * @returns {Promise<{ docRef, withdrawn: string[], rejected: {type, reason}[] }>}
  */
-async function withdrawConsent({ principalId, consentTypes = [] } = {}) {
-  if (!principalId) throw new Error("principalId is required");
-  if (!consentTypes.length) throw new Error("consentTypes must include at least one purpose to withdraw");
+async function withdrawConsent({ models, principalId, consentTypes } = {}) {
+  assertPrincipalId(principalId);
+  const types = assertStringArray(consentTypes, "consentTypes");
+  if (!types.length) throw new AppError("consentTypes must include at least one purpose to withdraw", 400);
 
-  const record = await ConsentRecord.findOne({ principalId });
+  const record = await models.ConsentRecord.findOne({ principalId });
   if (!record) throw new Error("No consent record found for this principal");
 
   const now = new Date();

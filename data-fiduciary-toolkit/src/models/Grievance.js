@@ -4,8 +4,8 @@ const { Schema } = mongoose;
 const grievanceSchema = new Schema({
   principalId: { type: String, required: true, index: true },
   refId: { type: String, required: true, unique: true },
-  subject: { type: String, required: true },
-  description: { type: String, required: true },
+  subject: { type: String, required: true, maxlength: 200 },
+  description: { type: String, required: true, maxlength: 10000 },
   addressedTo: { type: String, required: true }, // the fiduciary's Grievance Officer, per Section 13
   status: { type: String, enum: ["open", "in_progress", "resolved", "escalated"], default: "open" },
   slaDueAt: { type: Date, required: true },
