@@ -89,4 +89,36 @@ async function escalateToBoard({ models, refId, principalId } = {}) {
   return { refId: grievance.refId, status: grievance.status, escalatedAt: grievance.escalatedAt };
 }
 
-module.exports = { complaintToTheBoard, escalateToBoard };
+/**
+ * Every grievance filed by one principal, most recent first. Scoped by
+ * construction - the query filters on principalId, so this can never return
+ * another principal's grievances.
+ */
+async function listGrievances({ models, principalId }) {
+  assertPrincipalId(principalId);
+  const rows = await models.Grievance.find({ principalId }).sort({ createdAt: -1 }).lean();
+  return rows.map(
+    ({ refId, subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt }) => ({
+      refId, subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt,
+    })
+  );
+}
+
+/**
+ * A single grievance, scoped to its owner. principalId is part of the query
+ * filter itself, not checked afterwards, so a refId belonging to another
+ * principal simply does not match and comes back as the same 404 as a refId
+ * that does not exist at all - a 403 here would confirm the refId is real,
+ * turning this endpoint into an existence oracle for other principals'
+ * reference numbers.
+ */
+async function getGrievance({ models, principalId, refId }) {
+  assertPrincipalId(principalId);
+  assertNonEmptyString(refId, "refId", 64);
+  const row = await models.Grievance.findOne({ principalId, refId }).lean();
+  if (!row) throw new AppError("No grievance found with that reference", 404);
+  const { subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt } = row;
+  return { refId, subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt };
+}
+
+module.exports = { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance };

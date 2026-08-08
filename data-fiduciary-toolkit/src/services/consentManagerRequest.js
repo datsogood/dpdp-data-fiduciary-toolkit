@@ -35,4 +35,18 @@ async function consentManagerRequest({ models, principalId, message, preferredCo
   return { refId: request.refId, status: request.status };
 }
 
+/**
+ * Every consent-manager request filed by one principal, most recent first.
+ * Scoped by construction - the query filters on principalId, so this can
+ * never return another principal's requests.
+ */
+async function listConsentManagerRequests({ models, principalId }) {
+  assertPrincipalId(principalId);
+  const rows = await models.ConsentManagerRequest.find({ principalId }).sort({ createdAt: -1 }).lean();
+  return rows.map(({ refId, message, preferredConsentManager, status, createdAt }) => ({
+    refId, message, preferredConsentManager, status, createdAt,
+  }));
+}
+
 module.exports = consentManagerRequest;
+module.exports.listConsentManagerRequests = listConsentManagerRequests;

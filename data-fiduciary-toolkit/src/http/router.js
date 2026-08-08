@@ -5,10 +5,12 @@ const { AppError } = require("../utils/errors");
 const { findPrincipalByContact, findPrincipalById, lookupHash } = require("../utils/principalId");
 const persistPIIwithconsent = require("../services/persistPIIwithconsent");
 const withdrawConsent = require("../services/withdrawConsent");
+const { getConsentState } = require("../services/consentState");
 const { buildNotice, DEFAULT_NOTICE_LANGUAGE } = require("../config/notice");
-const { listRights, exerciseRight } = require("../services/dataPrincipalRights");
-const { complaintToTheBoard, escalateToBoard } = require("../services/complaintToTheBoard");
+const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = require("../services/dataPrincipalRights");
+const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
+const { listConsentManagerRequests } = consentManagerRequest;
 const { renderRightsPage, renderGrievanceForm, renderConsentManagerForm } = require("./forms");
 
 /**
@@ -221,6 +223,21 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   router.put("/consent/withdraw", requireAuth, withdraw);
   router.post("/consent/withdraw", requireAuth, withdraw);
 
+  /**
+   * The Section 11 right of access: the full event ledger, not just current
+   * state, plus the PII on file - unless the principal has been erased, in
+   * which case pii is null and erasedAt says when. Scoped to req.principalId
+   * only, so this can never read another principal's ledger.
+   */
+  router.get(
+    "/consent",
+    requireAuth,
+    wrap(async (req, res) => {
+      const result = await getConsentState({ models, principalId: req.principalId });
+      res.status(200).json(result);
+    })
+  );
+
   // ---------------------------------------------------------------------------
   // Data principal rights - Chapter III
   // ---------------------------------------------------------------------------
@@ -245,6 +262,24 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
         return res.type("html").send(`<p>Request received. Reference: <b>${result.refId}</b></p>`);
       }
       res.status(201).json(result);
+    })
+  );
+
+  // Every rights request the session principal has filed, and one by refId -
+  // both scoped to req.principalId only.
+  router.get(
+    "/rights/requests",
+    requireAuth,
+    wrap(async (req, res) => {
+      res.status(200).json(await listRightsRequests({ models, principalId: req.principalId }));
+    })
+  );
+
+  router.get(
+    "/rights/requests/:refId",
+    requireAuth,
+    wrap(async (req, res) => {
+      res.status(200).json(await getRightsRequest({ models, principalId: req.principalId, refId: req.params.refId }));
     })
   );
 
@@ -300,6 +335,24 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
     })
   );
 
+  // Every grievance the session principal has filed, and one by refId - both
+  // scoped to req.principalId only.
+  router.get(
+    "/grievances",
+    requireAuth,
+    wrap(async (req, res) => {
+      res.status(200).json(await listGrievances({ models, principalId: req.principalId }));
+    })
+  );
+
+  router.get(
+    "/grievances/:refId",
+    requireAuth,
+    wrap(async (req, res) => {
+      res.status(200).json(await getGrievance({ models, principalId: req.principalId, refId: req.params.refId }));
+    })
+  );
+
   // ---------------------------------------------------------------------------
   // Consent Manager handoff - Section 6(7)-(9)
   // ---------------------------------------------------------------------------
@@ -321,6 +374,16 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
         return res.type("html").send(`<p>Request received. Reference: <b>${result.refId}</b></p>`);
       }
       res.status(201).json(result);
+    })
+  );
+
+  // Every consent-manager request the session principal has filed - scoped
+  // to req.principalId only.
+  router.get(
+    "/consent-manager/requests",
+    requireAuth,
+    wrap(async (req, res) => {
+      res.status(200).json(await listConsentManagerRequests({ models, principalId: req.principalId }));
     })
   );
 

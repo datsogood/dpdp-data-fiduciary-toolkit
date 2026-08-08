@@ -61,4 +61,32 @@ async function exerciseRight({ models, principalId, right, details = "" } = {}) 
   return { refId: request.refId, right, status: request.status, contact: contactBlock() };
 }
 
-module.exports = { listRights, exerciseRight };
+/**
+ * Every rights request filed by one principal, most recent first. Scoped by
+ * construction - the query filters on principalId, so this can never return
+ * another principal's requests.
+ */
+async function listRightsRequests({ models, principalId }) {
+  assertPrincipalId(principalId);
+  const rows = await models.RightsRequest.find({ principalId }).sort({ createdAt: -1 }).lean();
+  return rows.map(({ refId, right, details, status, createdAt, updatedAt }) => ({ refId, right, details, status, createdAt, updatedAt }));
+}
+
+/**
+ * A single rights request, scoped to its owner. principalId is part of the
+ * query filter itself, not checked afterwards, so a refId belonging to
+ * another principal simply does not match and comes back as the same 404 as
+ * a refId that does not exist at all - a 403 here would confirm the refId is
+ * real, turning this endpoint into an existence oracle for other principals'
+ * reference numbers.
+ */
+async function getRightsRequest({ models, principalId, refId }) {
+  assertPrincipalId(principalId);
+  assertNonEmptyString(refId, "refId", 64);
+  const row = await models.RightsRequest.findOne({ principalId, refId }).lean();
+  if (!row) throw new AppError("No rights request found with that reference", 404);
+  const { right, details, status, createdAt, updatedAt } = row;
+  return { refId, right, details, status, createdAt, updatedAt };
+}
+
+module.exports = { listRights, exerciseRight, listRightsRequests, getRightsRequest };
