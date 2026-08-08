@@ -212,3 +212,205 @@ all). No such case turned up.
 
 Not touched: `test/connection.test.js` (deliberately, see above), any file
 under `src/`, and any test assertion.
+
+## Second pass: one server for the whole suite
+
+The first pass's per-process pooling (above) was correct as far as it went,
+but it does not hold as a merge gate: it pools one `mongod` per test *file*,
+and the file count kept growing as later tasks added test files. By the time
+this second pass started, the suite was intermittently failing with
+`StdoutInstanceError: Port "61513" already in use` from `MongoMemoryServer.create()`
+- 159/159 on one run, 135/160 on the next, same commit. The diagnosis (given,
+not re-derived here): a full run started 17 `mongod` instances near
+simultaneously - 1 from `pretest`'s warm-up, 11 from `db.js`'s per-process
+pool (grown from the 8 measured in the first pass as test files were added),
+5 created directly in `test/connection.test.js` - each asking for a random
+free port, and `mongodb-memory-server-core`'s `MongoInstance.js` does not
+retry a busy port; it fails fatally. Confirmed by reading
+`node_modules/mongodb-memory-server-core/lib/util/MongoInstance.js:360-361`
+before starting: on `EADDRINUSE` it emits `StdoutInstanceError` with no
+retry loop.
+
+The fix: exactly one `mongod` for the entire suite, started once in the
+parent process before `node --test` forks any test file, via
+`node --test --test-global-setup=<file>`.
+
+### What changed
+
+1. **`scripts/test-setup.js`** (new) - exports `globalSetup`/`globalTeardown`.
+   `globalSetup` starts one `MongoMemoryServer` (pinned to version `7.0.24`,
+   the version already cached at `~/.cache/mongodb-binaries`) and puts its
+   URI on `process.env.MONGO_TEST_URI`. `globalTeardown` stops it.
+
+2. **`test/helpers/db.js`** - no longer creates a server. `withDb` now reads
+   `MONGO_TEST_URI` and builds a per-call database URI on it
+   (`test/helpers/db.js`'s new `testDbUri(dbName)`, using `URL` to swap in
+   the path the same way `MongoMemoryServer.getUri(dbName)` does internally -
+   confirmed by reading `uriTemplate()`/`generateDbName()` in
+   `mongodb-memory-server-core/lib/util/utils.js`). The per-call `connect()`
+   (which applies `sanitizeFilter`) is unchanged, as is `dropDatabase()` +
+   `close()` in the `finally`. The `after()` hook that used to stop the
+   process's own server is gone - the harness no longer owns one. If
+   `MONGO_TEST_URI` is missing, `testDbUri` throws immediately with a message
+   telling the caller to use `npm test`, not `node --test` directly.
+
+3. **`test/connection.test.js`** - went from 5 `MongoMemoryServer.create()`
+   calls to zero. Checked the brief's reasoning against what each of the 4
+   tests actually asserts before changing anything:
+   - *"connect returns an isolated connection..."* and *"buildModels binds
+     models..."* each only ever needed one URI to connect to. Trivial -
+     `testDbUri("isolated")` / `testDbUri("buildModels")`.
+   - *"two connects to different URIs yield two independent connections"* -
+     previously two separate servers (so, incidentally, two different
+     `host:port`s). What it actually checks is that `connect()` doesn't
+     return a cached/singleton connection for a second call. I read
+     `src/db/connection.js`: `connect()` always calls
+     `mongoose.createConnection(uri)` fresh, with no cache of any kind keyed
+     on anything. Two different database names on the *same* `host:port`
+     (`testDbUri("connA")` / `testDbUri("connB")`) is not a weaker
+     substitute - it is a strictly more precise one, since it isolates the
+     variable under test (does `connect()` care about the URI at all) from
+     an unrelated one (are the ports different). Two different servers would
+     also have caught a hypothetical "cache keyed on the whole URI" bug, but
+     could have missed a narrower "cache keyed on host:port only, ignoring
+     path" bug; two databases on one server cannot miss that narrower case.
+   - *"sanitizeFilter is scoped to our connection..."* needs a host
+     connection (built with a bare `mongoose.createConnection`, standing in
+     for a host app) and a library connection (built with `connect()`), and
+     checks that our `sanitizeFilter` doesn't leak onto the host's
+     connection. That property is about the connection object, not the
+     server process - `testDbUri("host")` / `testDbUri("ours")` on the
+     shared server preserves it exactly.
+
+   No test in this file required a second `mongod` process to prove what it
+   claims. None were left alone with `MongoMemoryServer.create()` still in
+   them.
+
+4. **`scripts/warm-binary.js`** and the `pretest` script - removed. Their
+   purpose was to get the binary onto disk before `node --test` forked
+   per-file processes that would otherwise race on `~/.cache/mongodb-binaries/<version>.lock`
+   on a cold cache. `globalSetup` now runs `MongoMemoryServer.create()` once,
+   by itself, before any file is forked - the same race can no longer occur
+   by construction, so the separate warm-up step is redundant. Verified this
+   holds on an actually cold cache (see below) rather than just asserting it.
+
+5. **Pinned the `mongod` version.** `binary: { version: "7.0.24" }` in
+   `scripts/test-setup.js`'s `MongoMemoryServer.create()` call, matching the
+   binary already cached at `~/.cache/mongodb-binaries/mongod-arm64-darwin-7.0.24`.
+
+6. **`package.json`** - `"test"` is now
+   `"node --test --test-global-setup=scripts/test-setup.js"`. The `"pretest"`
+   entry is gone (nothing left for it to do). `npm test` remains the command;
+   never invoked as `npm test -- <file>`.
+
+### Verifying the `--test-global-setup` contract before relying on it
+
+Rather than trust the flag's name and my recollection of Node's docs, I
+checked both against the actual Node v26.3.1 binary before writing
+`test-setup.js` for real. First attempt used a default export
+(`module.exports = async function () {...}`), then named exports
+`setup`/`teardown` - both loaded (the module's top-level code ran) but the
+functions were never called, even when instrumented to throw
+unconditionally on entry, which would have surfaced as a hard failure if
+they'd run. Only named exports `globalSetup`/`globalTeardown` work on this
+Node version. Confirmed with a throwaway setup file and test file: env vars
+set inside `globalSetup` (in the parent process) are visible inside a
+forked test file's `process.env`, `globalSetup` runs once before any test
+file starts, and `globalTeardown` runs once after all test files finish,
+still able to see state set during `globalSetup` in the same process. This
+matches the task's description exactly, so I did not need to stop and flag
+a mismatch - but the exact export names were not something to guess at,
+since both wrong guesses failed silently rather than erroring.
+
+### Six consecutive full runs (`npm test`, warm cache)
+
+Confirmed idle first (`ps aux | grep -c "[m]ongod"` and
+`ps aux | grep -c "[n]ode --test"` both `0`) before starting, and confirmed
+idle again after every run below.
+
+| Run | Result | Wall clock (`time -p`, real) |
+|---|---|---|
+| 1 | 160/160, 0 failed | 35.38s |
+| 2 | 160/160, 0 failed | 35.79s |
+| 3 | 160/160, 0 failed | 35.77s |
+| 4 | 160/160, 0 failed | 34.12s |
+| 5 | 160/160, 0 failed | 35.81s |
+| 6 | 160/160, 0 failed | 35.49s |
+
+Six identical green runs, `exit=0` on every one. Each run's raw summary
+block:
+
+```
+ℹ tests 160
+ℹ suites 0
+ℹ pass 160
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+```
+
+### `mongod` instance count, before and after
+
+- **Before**: 17 (per the given diagnosis: 1 `pretest` warm-up + 11 pooled
+  in `db.js` + 5 direct in `connection.test.js`).
+- **After**: sampled mid-run with `ps aux | grep "[m]ongod-arm64"` while a
+  run was in flight (about 4s in, with 9 of the 16 forked test-file
+  processes still running per `pgrep -fl "node --test"`): **1**. Sampled
+  more than once during the same run; stayed at 1 throughout.
+
+### No `mongod` survives after the suite exits
+
+Checked after every one of the six runs above, plus the standalone mid-run
+sample and the cold-cache run below: `ps aux | grep "[m]ongod-arm64"` was
+empty within a few seconds of `npm test` exiting, every time. (Note for
+whoever reruns this: the naive `ps aux | grep -c "[m]ongod"` from the task's
+own idle-check command will self-match if it is executed inside a wrapper
+whose own command text contains the unbracketed word "mongod" - e.g. an
+echo label in the same script. Hit this once while sampling mid-run and
+confirmed it was a false positive, not a leaked process, by rerunning the
+check as an isolated command and by grepping for the actual binary name
+`mongod-arm64-darwin-7.0.24` instead.)
+
+### Cold-cache first run
+
+```
+rm -rf ~/.cache/mongodb-binaries && npm test
+```
+
+Passed first time: **160/160**, 42.25s wall clock (includes the actual
+binary download, since `globalSetup` is the only thing that touches
+`mongod` now). Confirmed the binary that landed at
+`~/.cache/mongodb-binaries/mongod-arm64-darwin-7.0.24` afterward matches the
+pinned version, by its filename and a fresh mtime. No leftover `mongod`
+after this run either.
+
+### What only passed before because each file had its own server
+
+None found. The property every `connection.test.js` test relies on -
+`connect()` builds a genuinely new, uncached connection every call - is true
+regardless of how many `mongod` processes back the URIs involved, and is
+enforced by `src/db/connection.js` itself, not by test isolation. The
+concurrent-write races in `consent.test.js` and `principal.test.js` (also
+flagged as a risk in the first pass) are unaffected: `withDb` still hands
+every call a brand-new connection and a brand-new, empty database, which is
+what those tests actually depend on - only the underlying `mongod` process
+is now shared, same as after the first pass, just shared suite-wide instead
+of per-file. Nothing in the diff changed a database name, connection
+lifecycle, or cleanup order that any assertion depends on.
+
+### Files changed
+
+- `data-fiduciary-toolkit/scripts/test-setup.js` (new) - `globalSetup`/`globalTeardown`,
+  one pinned `mongod` for the whole suite.
+- `data-fiduciary-toolkit/scripts/warm-binary.js` (deleted) - redundant once
+  `globalSetup` owns the only pre-fork server start.
+- `data-fiduciary-toolkit/test/helpers/db.js` - reads `MONGO_TEST_URI` instead
+  of owning a server; added `testDbUri`; dropped the `after()` shutdown hook.
+- `data-fiduciary-toolkit/test/connection.test.js` - 5 servers to 0, using
+  `testDbUri` for distinct databases on the shared server; no assertions
+  changed.
+- `data-fiduciary-toolkit/package.json` - `"test"` now wires in
+  `--test-global-setup`; `"pretest"` removed.
+
+Not touched: any file under `src/`, and no test's assertions.

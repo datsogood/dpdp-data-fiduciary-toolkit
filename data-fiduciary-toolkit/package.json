@@ -18,8 +18,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "pretest": "node scripts/warm-binary.js",
-    "test": "node --test",
+    "test": "node --test --test-global-setup=scripts/test-setup.js",
     "example": "node examples/server.js"
   },
   "peerDependencies": {

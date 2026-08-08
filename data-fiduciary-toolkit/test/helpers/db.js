@@ -1,5 +1,3 @@
-const { MongoMemoryServer } = require("mongodb-memory-server");
-const { after } = require("node:test");
 const { connect } = require("../../src/db/connection");
 
 /**
@@ -15,28 +13,38 @@ const { connect } = require("../../src/db/connection");
  * so 144 of 145 tests could not see it. Every query these tests run must be a
  * query the shipped library can actually execute.
  *
- * One server per process, not one per call. `node --test` forks one process
- * per test file, so a module-level server here is naturally one-per-file -
- * 8 instead of 76. Starting a mongod per withDb call made ports collide
- * often enough to fail whole runs.
+ * One mongod for the entire suite, not one per process. It is started once,
+ * in the parent, by scripts/test-setup.js's globalSetup (wired in via
+ * `node --test --test-global-setup=...` in the "test" script), which puts
+ * its URI on MONGO_TEST_URI for every forked test process to inherit. A
+ * server per test file - even pooled - still meant 11+ mongod instances
+ * starting near-simultaneously and racing for random free ports with no
+ * retry on collision.
  */
-let serverPromise;
-let counter = 0;
-
-function getServer() {
-  if (!serverPromise) serverPromise = MongoMemoryServer.create();
-  return serverPromise;
+function testDbUri(dbName) {
+  const base = process.env.MONGO_TEST_URI;
+  if (!base) {
+    throw new Error(
+      "MONGO_TEST_URI is not set. This is set by scripts/test-setup.js via " +
+        "`node --test --test-global-setup=...`, which only runs under `npm test`. " +
+        "Run the suite with `npm test`, not `node --test` directly."
+    );
+  }
+  const uri = new URL(base);
+  uri.pathname = `/${dbName}`;
+  return uri.toString();
 }
 
+let counter = 0;
+
 async function withDb(fn) {
-  const server = await getServer();
   // A fresh database per call, so isolation is unchanged - no test can see
   // another's documents, and model indexes are rebuilt per database. The
   // connection itself is also new per call, so buildModels' per-connection
   // model cache and each model's Model.init() index-build promise are fresh
   // too - neither can leak state from a previous database.
   const dbName = `t${process.pid}_${counter++}`;
-  const conn = await connect(server.getUri(dbName));
+  const conn = await connect(testDbUri(dbName));
   try {
     return await fn(conn);
   } finally {
@@ -45,16 +53,8 @@ async function withDb(fn) {
   }
 }
 
-// Stop the shared server after this file's tests finish, so no mongod is
-// left running once the process exits. `after()` (not process.on("exit"))
-// because the exit event only allows synchronous work - stopping mongod is
-// async - and after() is guaranteed by node --test to run once, after every
-// test in this file has settled, before the process moves on.
-after(async () => {
-  if (serverPromise) {
-    const server = await serverPromise;
-    await server.stop();
-  }
-});
-
-module.exports = { withDb };
+// Exported for test/connection.test.js, which needs distinct URIs and
+// independent connections it manages itself (including one built with a bare
+// mongoose.createConnection(), to stand in for a host app) rather than the
+// fn-wrapper + auto-cleanup withDb gives everything else.
+module.exports = { withDb, testDbUri };
