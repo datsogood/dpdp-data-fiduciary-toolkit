@@ -378,3 +378,32 @@ Task 5: FORWARD DEPENDENCY handled - T12's planned fault-injection test used onG
   throwing to force a 500, which this fix makes non-fatal. Plan updated to use onWithdrawal via
   PUT /consent/withdraw instead. T12 brief regenerated.
 Task 5: complete (commits 05a283f..4a805b9, review approved + 1 fix round). C1 CLOSED.
+
+Task 8: implementer DONE, 90/90, then fix round 1 (3 Important + 3 minors addressed; commits
+  77c4cfd..d26299b), 94/94. It raised two of the three findings ITSELF and was right on both.
+Task 8: task review found the notice core solid but three Important:
+   1. per-record lastNotice cannot support H3's claim. Concrete case: grant marketing in Jan,
+      catalog changes June, grant analytics July -> January's notice gone entirely, not even its
+      hash surviving. DESIGN CHANGED on the implementer's recommendation, which the reviewer
+      reached independently: content-addressed NoticeVersion side collection, noticeVersion
+      stamped per EVENT, lastNotice reduced to a pointer. Storage grows with distinct notices,
+      not with consent events.
+   2. the new `withdrawal` right silently no-opped - and was WORSE than pre-diff, where it was
+      rejected as unknown. Recognised, listed on the rights page promising withdrawal "as easily
+      as you gave it", and fake-succeeding with a manual ticket. Same failure class as H2/C4,
+      freshly created. Now redirects to the self-service flow.
+   3. the PUT notice test COULD NOT FAIL - it signed up via POST (which sets lastNotice), then
+      asserted the field was truthy, which setup guaranteed. Deleting PUT's wiring left it green.
+      Exactly the false-green my own Step 4b warning existed to prevent, relocated one route
+      over. Now asserts shownAt moves, with executed deliberate-break evidence in the report.
+Task 8: re-review went past the ask - fired 5 concurrent upserts at one version key, with and
+  without the index pre-built, and found exactly ONE document every time, no error. So the floor
+  is better than disclosed: not "at worst a harmless duplicate" but no duplicate at all on this
+  stack. It named the real residual gap: the NoticeVersion updateOne has no 11000 catch, so a
+  MongoDB version that did surface one would fail the request (not corrupt evidence).
+Task 8: minor (deferred) -> T14 Step 4c: pre-existing em dashes in six src/ files no task
+  rewrote wholesale. Every task correctly enforced the rule only on lines it touched.
+Task 8: minor (deferred) -> T14 Step 4d: ConsentRecord documents written before the lastNotice
+  shape change retain lastNotice.body at rest, and strict mode drops it silently on next
+  read/save. Package is unpublished so no migration script, but the README must say so.
+Task 8: complete (commits 5bca5e0..d26299b, review approved + 1 fix round)

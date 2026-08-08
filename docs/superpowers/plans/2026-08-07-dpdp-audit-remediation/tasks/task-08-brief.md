@@ -182,6 +182,62 @@ if (notice) {
 }
 ```
 
+- [ ] **Step 4a: Store the notice PER EVENT, not per record**
+
+My first draft put one `lastNotice` on the record, overwritten on every submission. That cannot support the claim H3 exists to make. Concretely: a principal grants `marketing` in January, the catalog changes in June, they grant `analytics` in July - and January's notice is now gone from the database entirely, not even its version hash surviving. "We can show what this person was told when they consented" becomes "we can show what the last person to touch this record was told." That is the same shape of gap H3 opened, moved rather than closed.
+
+Content-addressing is what makes the fix cheap. Store bodies once in a side collection keyed by their hash, so storage grows with the number of *distinct* notices ever shown - which only changes when the catalog or config changes - not with the number of consent events.
+
+Create `src/models/NoticeVersion.js`, following the `{ schema, build }` factory shape:
+
+```js
+const { Schema } = require("mongoose");
+
+/**
+ * One row per DISTINCT notice ever shown. Keyed by the content hash, so
+ * re-showing an unchanged notice a million times still stores one document.
+ *
+ * Separate from ConsentRecord because the evidentiary question is per consent
+ * act: "what was this person told when they granted marketing in January",
+ * not "what does the current notice say". Each consent event carries the
+ * version it was shown under; this collection resolves that version to text.
+ */
+const noticeVersionSchema = new Schema({
+  version: { type: String, required: true, unique: true, index: true },
+  language: { type: String, required: true },
+  body: { type: Schema.Types.Mixed, required: true },
+  firstSeenAt: { type: Date, default: Date.now },
+});
+
+module.exports = {
+  schema: noticeVersionSchema,
+  build: (connection) => connection.model("NoticeVersion", noticeVersionSchema),
+};
+```
+
+Register it in `src/models/index.js`. Then:
+
+- Add `noticeVersion: { type: String }` to the consent **event** subschema in `ConsentRecord.js`. Not required - events written before a notice exists, and by direct service callers who pass none, legitimately have none.
+- In `persistPIIwithconsent`, when a `notice` is supplied, upsert it once and stamp its version onto every event this call appends:
+
+```js
+  if (notice) {
+    // Upsert rather than insert: an unchanged notice is shown to every data
+    // principal, so this is one row per distinct notice, not per consent.
+    await models.NoticeVersion.updateOne(
+      { version: notice.version },
+      { $setOnInsert: { version: notice.version, language: notice.language, body: notice, firstSeenAt: now } },
+      { upsert: true }
+    );
+  }
+```
+
+and set `noticeVersion: notice ? notice.version : undefined` on each event object built in `decideFor`.
+
+- `record.lastNotice` becomes a lightweight pointer - `{ version, language, shownAt }`, no `body`. The body lives in `NoticeVersion` now. Keep it for convenience, since "what does this principal's current notice say" is a real question.
+
+Tests: two submissions under different catalogs leave **both** versions resolvable, and each event carries the version in force when it was written; showing an unchanged notice twice creates exactly one `NoticeVersion` document; and `NoticeVersion.countDocuments()` stays at 1 across several principals consenting under the same catalog.
+
 - [ ] **Step 4b: Wire `buildNotice()` into `POST /consent` - otherwise H3 is not closed**
 
 Add `src/http/router.js` to this task's Files list. Without this step the notice is snapshotted only when a direct service caller hands one in, and the only test exercising it calls the service directly - so over HTTP, which is every consent a real deployment captures, `notice` is `undefined` and `record.lastNotice` is never set. `getConsentState` would always return `notice: null` while the suite reported H3 closed.
@@ -195,7 +251,7 @@ const result = await persistPIIwithconsent({ models, pii, consentTypes, regrant,
 
 `GET /consent/new` (T13) must render the same object it will store, so the principal sees exactly what gets snapshotted.
 
-Add an HTTP-level test asserting `record.lastNotice.version` is set after a `POST /consent`, not just after a direct service call.
+Add HTTP-level tests for **both** routes, and make the PUT one able to fail. Asserting `lastNotice.version` is truthy after a PUT is false-green: the POST that set the principal up already made it truthy, and an unchanged catalog produces the same version, so deleting PUT's wiring entirely leaves the assertion passing. Capture `lastNotice.shownAt` after the POST and assert it is strictly later after the PUT - `shownAt` is refreshed on every call, so only a working PUT-side snapshot moves it.
 
 - [ ] **Step 4c: Add the notice items the Act requires**
 
