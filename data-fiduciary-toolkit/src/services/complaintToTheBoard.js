@@ -113,8 +113,8 @@ async function listGrievances({ models, principalId }) {
   assertPrincipalId(principalId);
   const rows = await models.Grievance.find({ principalId }).sort({ createdAt: -1 }).limit(200).lean();
   return rows.map(
-    ({ refId, subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt }) => ({
-      refId, subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt,
+    ({ refId, subject, description, addressedTo, status, slaDueAt, resolution, escalatedToBoard, escalatedAt, createdAt, updatedAt }) => ({
+      refId, subject, description, addressedTo, status, slaDueAt, resolution, escalatedToBoard, escalatedAt, createdAt, updatedAt,
     })
   );
 }
@@ -132,8 +132,8 @@ async function getGrievance({ models, principalId, refId }) {
   assertNonEmptyString(refId, "refId", 64);
   const row = await models.Grievance.findOne({ principalId, refId }).lean();
   if (!row) throw new AppError("No grievance found with that reference", 404);
-  const { subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt } = row;
-  return { refId, subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt };
+  const { subject, description, addressedTo, status, slaDueAt, resolution, escalatedToBoard, escalatedAt, createdAt, updatedAt } = row;
+  return { refId, subject, description, addressedTo, status, slaDueAt, resolution, escalatedToBoard, escalatedAt, createdAt, updatedAt };
 }
 
 module.exports = { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance };

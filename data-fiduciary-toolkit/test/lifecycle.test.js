@@ -5,7 +5,8 @@ const { withDb } = require("./helpers/db");
 process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
 const { advanceRightsRequest, advanceGrievance, advanceConsentManagerRequest } = require("../src/services/requestLifecycle");
-const { escalateToBoard } = require("../src/services/complaintToTheBoard");
+const { complaintToTheBoard, escalateToBoard, getGrievance } = require("../src/services/complaintToTheBoard");
+const { exerciseRight, getRightsRequest } = require("../src/services/dataPrincipalRights");
 
 const PID = "a".repeat(64);
 
@@ -100,5 +101,40 @@ test("a consent manager request can be advanced, and its transitions have no res
       (e) => e.status === 409,
       "connected -> received is not an allowed transition"
     );
+  });
+});
+
+// End to end, not a projection check in isolation: this fails if either the
+// getGrievance projection drops resolution again, or advanceGrievance stops
+// persisting it - the two things a projection-only test cannot tell apart.
+test("a resolved grievance's resolution is visible on the principal-facing read path", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const filed = await complaintToTheBoard({
+      models,
+      principalId: PID,
+      subject: "Repeated calls",
+      description: "Collections calling after 9pm",
+    });
+    await advanceGrievance({ models, refId: filed.refId, status: "resolved", resolution: "Calls stopped and agent retrained" });
+
+    const seen = await getGrievance({ models, principalId: PID, refId: filed.refId });
+    assert.equal(seen.status, "resolved");
+    assert.equal(seen.resolution, "Calls stopped and agent retrained");
+  });
+});
+
+// Same gap, same fix, same reasoning - RightsRequest gained resolution in
+// this task too, and getRightsRequest predates that field.
+test("a closed rights request's resolution is visible on the principal-facing read path", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const filed = await exerciseRight({ models, principalId: PID, right: "erasure" });
+    await advanceRightsRequest({ models, refId: filed.refId, status: "in_progress" });
+    await advanceRightsRequest({ models, refId: filed.refId, status: "closed", resolution: "PII erased" });
+
+    const seen = await getRightsRequest({ models, principalId: PID, refId: filed.refId });
+    assert.equal(seen.status, "closed");
+    assert.equal(seen.resolution, "PII erased");
   });
 });

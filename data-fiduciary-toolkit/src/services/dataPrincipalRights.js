@@ -74,7 +74,9 @@ async function exerciseRight({ models, principalId, right, details = "" } = {}) 
 async function listRightsRequests({ models, principalId }) {
   assertPrincipalId(principalId);
   const rows = await models.RightsRequest.find({ principalId }).sort({ createdAt: -1 }).limit(200).lean();
-  return rows.map(({ refId, right, details, status, createdAt, updatedAt }) => ({ refId, right, details, status, createdAt, updatedAt }));
+  return rows.map(({ refId, right, details, status, resolution, createdAt, updatedAt }) => ({
+    refId, right, details, status, resolution, createdAt, updatedAt,
+  }));
 }
 
 /**
@@ -90,8 +92,8 @@ async function getRightsRequest({ models, principalId, refId }) {
   assertNonEmptyString(refId, "refId", 64);
   const row = await models.RightsRequest.findOne({ principalId, refId }).lean();
   if (!row) throw new AppError("No rights request found with that reference", 404);
-  const { right, details, status, createdAt, updatedAt } = row;
-  return { refId, right, details, status, createdAt, updatedAt };
+  const { right, details, status, resolution, createdAt, updatedAt } = row;
+  return { refId, right, details, status, resolution, createdAt, updatedAt };
 }
 
 module.exports = { listRights, exerciseRight, listRightsRequests, getRightsRequest };
