@@ -54,15 +54,28 @@ function generateDocRef(prefix) {
  * Matching rule, and why it is not "either hash matches":
  *
  *   - email supplied -> match on emailHash ONLY.
- *   - no email       -> match on phoneHash.
+ *   - no email       -> match NOTHING. Always create.
  *
- * A phone number is not a person. The stated audience is social and public
- * sector beneficiaries, who routinely share one handset across a household, so
- * "same phone" cannot mean "same data principal": if a mother registers with
- * phone X and her daughter then registers a different email with phone X,
- * matching on phone would either hand the daughter her mother's record or - once
- * the router's existence check is in place - refuse to register the daughter at
- * all. Neither is acceptable.
+ * A phone number is not a person, and it is not a weaker identifier either -
+ * it is not an identifier at all. The stated audience is social and public
+ * sector beneficiaries, who often have no email and routinely share one
+ * handset across a household, so "same phone" cannot mean "same data
+ * principal".
+ *
+ * Falling back to phoneHash when there was no email looked like a harmless
+ * concession to that population and was the opposite: a mother registering
+ * phone-only, then her daughter registering the same handset with no email of
+ * her own, matched the mother's document - and the router's pre-write
+ * existence check turned that match into a 409, so the daughter could not
+ * register AT ALL. That is the exact population the design names, permanently
+ * locked out. Two members of one household who both lack an email is not an
+ * edge case for this audience, it is the common case.
+ *
+ * The residual cost is a duplicate record when a phone-only person resubmits,
+ * because nothing on file can tell "the same woman again" from "her sister".
+ * That is recoverable by the host - it holds whatever real-world knowledge
+ * would disambiguate them. A permanently unregistrable beneficiary is not
+ * recoverable, and an account takeover is worse than either.
  *
  * That means a plain email correction is NOT inferred here (an email that
  * matches nothing creates a new principal). Correcting an email is an
@@ -89,11 +102,10 @@ async function findOrCreatePrincipal({ models, pii }) {
   const emailHash = email ? lookupHash(email) : undefined;
   const phoneHash = phone ? lookupHash(phone) : undefined;
 
-  // Email is the stronger identifier. Fall back to phone only when there is no
-  // email at all - see the docstring on why a shared phone must not merge two
-  // people.
-  const filter = emailHash ? { emailHash } : { phoneHash };
-  let principal = await models.Principal.findOne(filter);
+  // Email is the ONLY thing signup matches on. With no email there is nothing
+  // here that identifies anybody, so this always creates - see the docstring
+  // for why matching on a shared handset locked a household out entirely.
+  let principal = emailHash ? await models.Principal.findOne({ emailHash }) : null;
   const created = !principal;
 
   if (created) {
@@ -123,21 +135,41 @@ async function findOrCreatePrincipal({ models, pii }) {
 /**
  * Read-only lookup by contact details. Creates nothing, modifies nothing.
  *
- * The router needs this to decide whether POST /consent is a signup or an
- * update BEFORE it writes anything. Deciding after the write - by reading
- * findOrCreatePrincipal's `created` flag - would mean an unauthenticated
- * caller had already overwritten an existing person's name, phone, PAN and
- * address by the time the 409 was sent, which is the whole of the C1 attack.
+ * This is the building block for a host's own sign-in: turn a contact detail
+ * the host has ALREADY verified the person controls - a clicked email link, a
+ * completed OTP - into the principalId resolvePrincipal must return.
+ *
+ * A phone number never resolves on its own to a single data principal, so the
+ * phone branch REFUSES an ambiguous number instead of guessing. It used to
+ * answer a deliberately non-unique phoneHash with findOne, which returns an
+ * arbitrary match: a mother registers phone-only, her daughter registers her
+ * own email on the same handset, and the lookup for that number answers with
+ * the MOTHER. A daughter completing an OTP on the household handset would be
+ * issued a session for her mother - reading her PII and her consent ledger,
+ * and able to append irreversible withdrawals to it. Verifying control of the
+ * handset is not the same as verifying which household member is holding it,
+ * and only the host can close that gap.
+ *
+ * The router does NOT use the phone branch. Its pre-write existence check on
+ * POST /consent passes email only, matching findOrCreatePrincipal, which
+ * matches on emailHash and nothing else - a phone-only signup must always
+ * create rather than 409 a beneficiary who shares a handset.
  */
 async function findPrincipalByContact({ models, email, phone }) {
-  // Must use the SAME matching rule as findOrCreatePrincipal, or the router's
-  // existence check and the service's lookup disagree: the router would 409 a
-  // person the service would have treated as new, or vice versa.
   if (email && typeof email === "string") {
     return models.Principal.findOne({ emailHash: lookupHash(email) });
   }
   if (phone && typeof phone === "string") {
-    return models.Principal.findOne({ phoneHash: lookupHash(phone) });
+    // limit(2) - one row is enough to answer with, two is enough to refuse
+    // with, and nothing here needs to count the whole household.
+    const rows = await models.Principal.find({ phoneHash: lookupHash(phone) }).limit(2);
+    if (rows.length > 1) {
+      throw new AppError(
+        "That phone number identifies more than one data principal - it cannot be used on its own to sign in",
+        409
+      );
+    }
+    return rows[0] || null;
   }
   return null;
 }

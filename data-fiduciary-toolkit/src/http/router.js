@@ -286,7 +286,13 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
     "/consent",
     wrap(async (req, res) => {
       const pii = readPii(req.body);
-      const existing = await findPrincipalByContact({ models, email: pii.email, phone: pii.phone });
+      // EMAIL ONLY, matching findOrCreatePrincipal's own matching rule - the
+      // two must agree or this route 409s people the service would have
+      // treated as new. Passing the phone too used to 409 the second
+      // phone-only member of a household sharing one handset, which is
+      // precisely the population this toolkit names as its audience, and left
+      // them with no way to register at all.
+      const existing = await findPrincipalByContact({ models, email: pii.email });
       if (existing) {
         throw new AppError("principal already exists - sign in to change your consent", 409);
       }

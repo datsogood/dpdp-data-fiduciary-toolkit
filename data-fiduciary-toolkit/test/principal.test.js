@@ -61,6 +61,52 @@ test("two people sharing a phone can both register", async () => {
   });
 });
 
+test("two people sharing a phone and having NO email can both register", async () => {
+  // The stated audience is beneficiaries who often have no email and share a
+  // household handset. The pre-existing shared-phone test gives both women
+  // distinct emails, so it passed while this - the case the design actually
+  // names - 409'd the second person and left her unregistrable.
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const mother = await findOrCreatePrincipal({ models, pii: { name: "Asha", phone: "9876543210" } });
+    const daughter = await findOrCreatePrincipal({ models, pii: { name: "Priya", phone: "9876543210" } });
+
+    assert.equal(mother.created, true);
+    assert.equal(daughter.created, true, "a phone number is not an identity - the second person must get her own record");
+    assert.notEqual(daughter.principal.principalId, mother.principal.principalId);
+    assert.equal(await models.Principal.countDocuments(), 2);
+    assert.equal(
+      (await models.Principal.findOne({ principalId: mother.principal.principalId })).pii.name,
+      "Asha",
+      "the second registration must not have overwritten the first person's record"
+    );
+  });
+});
+
+test("a phone number that identifies more than one principal is refused for sign-in, not guessed", async () => {
+  // findPrincipalByContact is exported as the building block for real sign-in.
+  // Answering a deliberately non-unique phoneHash with findOne returned an
+  // arbitrary match: a daughter completing an OTP on the household handset
+  // would be issued a session for her MOTHER, able to read her PII and her
+  // consent ledger and to append irreversible withdrawals to it.
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const mother = await findOrCreatePrincipal({ models, pii: { name: "Asha", phone: "9876543210" } });
+
+    const alone = await findPrincipalByContact({ models, phone: "9876543210" });
+    assert.equal(alone.principalId, mother.principal.principalId,
+      "one principal on a number still resolves - the refusal must be about ambiguity, not about phone");
+
+    await findOrCreatePrincipal({ models, pii: { name: "Priya", email: "priya@example.com", phone: "9876543210" } });
+
+    await assert.rejects(
+      () => findPrincipalByContact({ models, phone: "9876543210" }),
+      (e) => e.status === 409 && /more than one data principal/i.test(e.message),
+      "an ambiguous handset must refuse rather than hand back an arbitrary household member"
+    );
+  });
+});
+
 test("correcting an email keeps the same principalId, via the authenticated path", async () => {
   await withDb(async (conn) => {
     const models = buildModels(conn);

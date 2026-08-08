@@ -2,8 +2,8 @@
 //
 // Sequence:
 //   1. POST /consent            - create a principal (pii + consentTypes)
-//   2. POST /demo/login         - exchange the email/phone you just used for
-//                                 a demo session token
+//   2. POST /demo/login         - exchange the EMAIL you just used for a demo
+//                                 session token
 //   3. any authenticated route  - send the token back as x-demo-session
 //
 // Example, with the server running on the default port:
@@ -40,8 +40,22 @@ async function main() {
   // Clearly-labelled demo sign-in, so the rest of the example is reachable.
   // Exchange a contact detail for a token. A real deployment would send a
   // one-time link to that address instead of returning a token here.
+  //
+  // EMAIL ONLY, deliberately. A phone number is not an identity: this
+  // toolkit's audience shares one handset across a household, so the same
+  // number can belong to several data principals and findPrincipalByContact
+  // refuses to guess between them. Presenting phone as sufficient here would
+  // have shown adopters a sign-in that hands a daughter her mother's session
+  // the moment two household members register. A deployment that needs phone
+  // sign-in has to disambiguate with something it knows and this library does
+  // not - it cannot be done from the number alone.
   app.post("/demo/login", async (req, res) => {
-    const principal = await findPrincipalByContact({ models, email: req.body.email, phone: req.body.phone });
+    if (!req.body.email) {
+      return res.status(400).json({
+        error: "email is required - a phone number alone does not identify a data principal",
+      });
+    }
+    const principal = await findPrincipalByContact({ models, email: req.body.email });
     if (!principal) return res.status(404).json({ error: "no such principal - POST /consent first" });
     const token = crypto.randomBytes(16).toString("hex");
     demoSessions.set(token, principal.principalId);

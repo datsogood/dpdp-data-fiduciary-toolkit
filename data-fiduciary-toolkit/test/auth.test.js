@@ -197,6 +197,42 @@ test("the 409 does not lock out a household sharing one handset", async () => {
   });
 });
 
+test("the 409 does not lock out two household members who have NO email at all", async () => {
+  // The test above gives both women their own email, which is why it passed
+  // while this one - the case the stated audience actually lives in - did not.
+  // With phoneHash in the existence check, the second phone-only registration
+  // matched the first person's document and 409'd, leaving her permanently
+  // unable to register over HTTP.
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { call, close } = await app(conn);
+    try {
+      const mother = await call("POST", "/consent", {
+        pii: { name: "Asha", phone: "9876543210", dob: "1970-04-01" },
+        consentTypes: ["marketing"],
+      });
+      assert.equal(mother.status, 201);
+
+      const daughter = await call("POST", "/consent", {
+        pii: { name: "Priya", phone: "9876543210", dob: "1995-06-15" },
+        consentTypes: ["analytics"],
+      });
+      assert.equal(daughter.status, 201,
+        "a beneficiary with no email, on a handset she shares, must still be able to register");
+
+      const motherId = (await mother.json()).principalId;
+      const daughterId = (await daughter.json()).principalId;
+      assert.notEqual(daughterId, motherId);
+      assert.equal(await models.Principal.countDocuments({}), 2);
+      assert.equal((await models.Principal.findOne({ principalId: motherId })).pii.name, "Asha",
+        "the second registration must not have overwritten the first person's PII");
+      assert.equal(await models.ConsentRecord.countDocuments({}), 2, "each of them needs her own ledger");
+    } finally {
+      await close();
+    }
+  });
+});
+
 test("PUT /consent updates the session principal, and cannot reach another principal by email", async () => {
   await withDb(async (conn) => {
     const models = buildModels(conn);
