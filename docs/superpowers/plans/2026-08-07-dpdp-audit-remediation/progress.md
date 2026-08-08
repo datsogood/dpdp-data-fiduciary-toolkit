@@ -501,3 +501,26 @@ Task 12: NEW BREAKING CHANGE for T14's changelog - the DPO shape check now refus
   previously booted. Deliberately not RFC 5322: wrongly rejecting a real Grievance Officer
   address is the worse failure. T14's changelog list expanded to seven items.
 Task 12: complete (commits 13624b3..1668c73, review approved + 1 fix round)
+Task 13: implementer DONE, 140/140, then fix round 1 (commits ef86a26..f5421b2), 142/142. H6
+  CLOSED - the browser surface works end to end.
+Task 13: task review APPROVED with NO Critical and NO Important. It verified all four properties
+  from code, and singled out the withdrawal-submission test for asserting against the raw ledger
+  rather than grepping markup - a test that only checks a <form> exists proves nothing about
+  whether it can be submitted.
+Task 13: the implementer extended the shared ERROR MAPPER beyond its brief so browser users see
+  errors as HTML - its answer to what a minor rejected by the age gate actually sees. That needed
+  checking, because the mapper is where the no-leak rule lives. Reviewer went through it line by
+  line: the >=500 branch is untouched and still returns the fixed generic string regardless of
+  wantsHtml, both HTML paths pass through escapeHtml, branch order preserved. It also
+  independently confirmed the implementer's claim that no existing test hits the new branch, by
+  grepping every Accept: text/html in the suite. Judged appropriate initiative, not scope creep.
+Task 13: fix round closed two Minors that sat inside H6's own journey - the withdrawal form
+  landed a browser user on raw JSON while granting gave a styled receipt (H6 IS "withdrawal as
+  easy as granting"), and the consent receipt showed principalId without no-store while two read
+  routes revealing far less had it. I explicitly told it NOT to fix the third minor: a genuine
+  500 staying JSON-only is right.
+Task 13: fix round re-review ADJUDICATED BY CONTROLLER. One new renderer, its wiring, two header
+  lines and tests. I verified renderWithdrawalReceipt exists and is wired at router.js:371, and
+  no-store is set on both receipt paths with the reasoning recorded inline. Suite green at
+  142/142. Recorded rather than silently skipped.
+Task 13: complete (commits b26be9e..f5421b2, review approved + 1 fix round)
