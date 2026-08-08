@@ -13,9 +13,21 @@ const { AppError } = require("../utils/errors");
  * stored with the consent, because "we obtained consent" is only evidence if
  * you can also show what the person was told.
  *
- * Only 'en' ships here. Add translations by supplying NOTICE_LANGUAGES and a
- * translation map - the structure is deliberately data, not prose, so it can
- * be translated without touching code.
+ * ONLY ENGLISH SHIPS, and there is no translation map anywhere in this
+ * package. Section 5(3) permits English or any Eighth Schedule language, but
+ * every string below comes from the single English catalog while `language`
+ * is validated and stamped onto the body - so configuring another language
+ * produced an ENGLISH notice labelled as that language, stored under its own
+ * content hash and cited by every consent event written under it. That is
+ * affirmative false evidence of compliance with the one limb this toolkit
+ * cannot deliver, on an append-only ledger.
+ *
+ * So assertConfigured refuses to boot with any NOTICE_LANGUAGES entry other
+ * than "en". The validation here stays - it is what makes an unsupported
+ * `?lang=` a 400 rather than a silent fallback - but it is no longer the only
+ * thing standing between a deployment and a mislabelled notice. Do not add a
+ * language to NOTICE_LANGUAGES without also registering a translated catalog
+ * and relaxing that boot check deliberately.
  */
 const EIGHTH_SCHEDULE = [
   "as", "bn", "brx", "doi", "gu", "hi", "kn", "ks", "kok", "mai", "ml", "mni",

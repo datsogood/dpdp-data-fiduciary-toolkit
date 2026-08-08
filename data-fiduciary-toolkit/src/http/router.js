@@ -617,7 +617,16 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
     }
 
     console.error("[dpdp-toolkit] unhandled error:", err);
-    res.status(err && typeof err.status === "number" ? err.status : 500).json({ error: "internal error" });
+    const status = err && typeof err.status === "number" ? err.status : 500;
+    // Same content negotiation as the two branches above, which this branch
+    // alone was missing - so a browser user filling in the consent form got a
+    // raw JSON body with Content-Type: application/json, on the one branch a
+    // misconfigured deployment actually lands them on. The MESSAGE is still
+    // withheld for the reason given above; only the rendering changes.
+    if (wantsHtml(req)) {
+      return res.status(status).type("html").send("<p>Something went wrong at our end. Please try again later.</p>");
+    }
+    res.status(status).json({ error: "internal error" });
   });
 
   return router;

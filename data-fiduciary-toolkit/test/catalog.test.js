@@ -1,6 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { getCatalog, getValidConsentTypes, getWithdrawableTypes, RIGHTS_CATALOG } = require("../src/config/catalog");
+const { execFileSync } = require("node:child_process");
+
+// Set before requiring the catalog: FIDUCIARY is captured at module load, and
+// assertConfigured checks the DPO address before it reaches the two settings
+// the tests at the bottom of this file are about.
+process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
+process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
+const { getCatalog, getValidConsentTypes, getWithdrawableTypes, RIGHTS_CATALOG, assertConfigured } =
+  require("../src/config/catalog");
 
 // The real Section 7 sub-clauses, verified against the statute text. A
 // legitimate use must cite one of these exactly. A prefix check like
@@ -138,4 +146,86 @@ test("every entry declares prohibitedForChildren explicitly", () => {
       `${entry.type}: prohibitedForChildren must be an explicit boolean`
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// assertConfigured - the boot gate. createRouter calls it before building any
+// route, so anything it misses becomes a failure in front of a data principal
+// instead of a failure at startup.
+// ---------------------------------------------------------------------------
+
+test("a correctly configured deployment boots", () => {
+  // Non-vacuity guard for the two tests below: if this ever throws, they are
+  // passing on the wrong error and prove nothing about what they name.
+  assertConfigured();
+});
+
+test("assertConfigured refuses to boot without a strong PRINCIPAL_ID_SECRET", () => {
+  // .env.example ships this EMPTY and the README says to copy that file, and
+  // assertConfigured checked the DPO address and both SLA integers but not
+  // this. With it unset the router built, health checks passed and GET
+  // /consent/new rendered - and the FIRST POST /consent returned a 500.
+  const saved = process.env.PRINCIPAL_ID_SECRET;
+  try {
+    delete process.env.PRINCIPAL_ID_SECRET;
+    assert.throws(() => assertConfigured(), /PRINCIPAL_ID_SECRET/,
+      "an unset secret must fail at boot, like the DPO address does");
+
+    process.env.PRINCIPAL_ID_SECRET = "";
+    assert.throws(() => assertConfigured(), /PRINCIPAL_ID_SECRET/, "empty is what .env.example actually ships");
+
+    process.env.PRINCIPAL_ID_SECRET = "   ";
+    assert.throws(() => assertConfigured(), /PRINCIPAL_ID_SECRET/);
+
+    // The floor has to match utils/principalId.js's own secret(), or a
+    // deployment boots and then throws 500 on the first request anyway.
+    process.env.PRINCIPAL_ID_SECRET = "a".repeat(31);
+    assert.throws(() => assertConfigured(), /32/, "31 characters is below the floor lookupHash itself enforces");
+
+    process.env.PRINCIPAL_ID_SECRET = "a".repeat(32);
+    assertConfigured();
+  } finally {
+    process.env.PRINCIPAL_ID_SECRET = saved;
+  }
+});
+
+// NOTICE_LANGUAGES is read once at module load, so this has to be a
+// subprocess - the same technique test/children.test.js uses for TZ.
+function bootWith(env) {
+  const probe = `
+    process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
+    process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
+    const { assertConfigured } = require("./src/config/catalog");
+    try {
+      assertConfigured();
+      console.log("BOOTED");
+    } catch (e) {
+      console.log("REFUSED: " + e.message);
+    }
+  `;
+  return execFileSync(process.execPath, ["-e", probe], {
+    env: { ...process.env, ...env },
+    cwd: process.cwd(),
+    encoding: "utf-8",
+  });
+}
+
+test("assertConfigured refuses to boot with a notice language that has no catalog", () => {
+  // buildNotice validates the language and stamps it onto the body while every
+  // string still comes from the single English catalog, so NOTICE_LANGUAGES=en,hi
+  // with lang=hi produced an ENGLISH notice labelled hi, under its own content
+  // hash, cited by every consent event written under it - affirmative false
+  // evidence of Section 5(3) compliance on an append-only ledger.
+  const refused = bootWith({ NOTICE_LANGUAGES: "en,hi" });
+  assert.match(refused, /REFUSED/, "a language with no translated catalog must not boot");
+  assert.match(refused, /hi/, "the error must name the offending language");
+  assert.match(refused, /Section 5\(3\)/, "and say what the harm is, not just that it was refused");
+
+  // Not merely "anything but exactly en" - a deployment naming only an
+  // Eighth Schedule language must be refused just as firmly as a mixed list.
+  assert.match(bootWith({ NOTICE_LANGUAGES: "hi" }), /REFUSED/);
+
+  // And the supported configuration must still boot, or this test is only
+  // asserting that assertConfigured throws.
+  assert.match(bootWith({ NOTICE_LANGUAGES: "en" }), /BOOTED/);
 });

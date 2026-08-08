@@ -532,6 +532,38 @@ test("an AppError carrying a 500 does not echo its message", async () => {
   });
 });
 
+test("a browser gets HTML on the 5xx branch too, and still no internal detail", async () => {
+  // The >= 500 branch was the only one of the three in the error mapper that
+  // did no negotiation, so a data principal filling in the consent form in a
+  // browser received a raw JSON body with Content-Type: application/json -
+  // on precisely the branch a misconfigured deployment lands them on.
+  await withDb(async (conn) => {
+    // Built BEFORE the secret is removed: assertConfigured now refuses to
+    // build a router without one, which is fix 5's other half. This test is
+    // about what a request that fails mid-flight returns, not about boot.
+    const { call, close } = await app(conn);
+    const savedSecret = process.env.PRINCIPAL_ID_SECRET;
+    const savedError = console.error;
+    console.error = () => {};
+    try {
+      delete process.env.PRINCIPAL_ID_SECRET;
+      const res = await call("POST", "/consent", { pii: PII, consentTypes: [] }, { Accept: "text/html" });
+      assert.equal(res.status, 500);
+      assert.match(res.headers.get("content-type"), /text\/html/,
+        "a browser must not be handed a JSON error body it cannot read");
+
+      const html = await res.text();
+      assert.doesNotMatch(html, /PRINCIPAL_ID_SECRET|openssl/,
+        "rendering as HTML must not start echoing the internal message the JSON branch withholds");
+      assert.match(html, /<p>/, "and it must be a page, not the bare string");
+    } finally {
+      console.error = savedError;
+      process.env.PRINCIPAL_ID_SECRET = savedSecret;
+      await close();
+    }
+  });
+});
+
 test("a mongoose cast failure is a 400 naming the field, not a 500 and not the raw value", async () => {
   await withDb(async (conn) => {
     const { call, close } = await app(conn);

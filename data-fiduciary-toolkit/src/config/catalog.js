@@ -37,7 +37,8 @@ function assertPositiveInteger(value, envName) {
 }
 
 /**
- * Fails fast on configuration that would be shown to a data principal.
+ * Fails fast on configuration that would be shown to a data principal, and on
+ * the two settings whose absence only surfaces mid-request.
  *
  * A grievance page telling people to contact dpo@example.com fails the duty
  * to publish valid Grievance Officer contact details while looking like it
@@ -68,6 +69,42 @@ function assertConfigured() {
   // Same defect, same consequence: exerciseRight builds slaDueAt from this,
   // and an Invalid Date fails the RightsRequest schema on save.
   assertPositiveInteger(FIDUCIARY.rightsSlaDays, "RIGHTS_SLA_DAYS");
+
+  // The one required secret this function did not check, while .env.example
+  // ships it EMPTY and the README tells you to copy that file. Left unset the
+  // router builds fine, health checks pass and GET /consent/new renders - and
+  // the FIRST POST /consent returns 500, because lookupHash throws. Exactly
+  // the failure mode the paragraph above rejects for the DPO address: silent
+  // at boot, loud in front of a data principal, fixed by one env var.
+  //
+  // Read from the environment rather than from FIDUCIARY: this is a secret,
+  // and it has no business sitting in an object the toolkit exports for
+  // introspection. The floor matches utils/principalId.js's own secret().
+  const secret = process.env.PRINCIPAL_ID_SECRET;
+  if (typeof secret !== "string" || secret.trim().length < 32) {
+    throw new Error(
+      "PRINCIPAL_ID_SECRET is unset or shorter than 32 characters. It keys the lookup hash for every data " +
+        "principal's email and phone, so a weak one is guessable and an absent one makes the first consent " +
+        "submission fail with a 500. Generate one with: openssl rand -hex 32"
+    );
+  }
+
+  // Required lazily, INSIDE the function, on purpose: config/notice.js
+  // requires this module at load time, so a top-level require here would be
+  // circular and leave notice.js destructuring a half-built exports object.
+  // By the time createRouter calls this, both modules are fully loaded.
+  const { SUPPORTED_NOTICE_LANGUAGES } = require("./notice");
+  const untranslated = SUPPORTED_NOTICE_LANGUAGES.filter((lang) => lang !== "en");
+  if (untranslated.length) {
+    throw new Error(
+      `NOTICE_LANGUAGES names ${untranslated.join(", ")}, but only "en" has a notice catalog in this toolkit. ` +
+        "buildNotice validates the language and stamps it onto the body, while every string still comes from " +
+        "the single English catalog - so a request for another language returns an ENGLISH notice labelled as " +
+        "that language, stored under its own content hash and referenced by every consent event written under " +
+        "it. That manufactures affirmative false evidence of Section 5(3) compliance on an append-only ledger. " +
+        "Remove it, or register a translated catalog for it first."
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
