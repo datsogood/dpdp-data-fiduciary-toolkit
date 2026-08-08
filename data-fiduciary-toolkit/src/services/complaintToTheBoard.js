@@ -6,7 +6,7 @@ const { AppError } = require("../utils/errors");
 /**
  * Files a grievance. Named to match what the person clicks ("complain to
  * the Board"), but per Section 13 a complaint must first go to the
- * fiduciary's own Grievance Officer — the Board only hears it if that isn't
+ * fiduciary's own Grievance Officer - the Board only hears it if that isn't
  * resolved within the SLA. This function records the grievance as addressed
  * to the DPO and sets that SLA; use escalateToBoard() after it lapses.
  *
@@ -46,7 +46,16 @@ async function complaintToTheBoard({ models, principalId, subject, description }
     addressedTo: FIDUCIARY.dpoName,
     dpoEmail: FIDUCIARY.dpoEmail,
     slaDueAt,
-    note: `This has been sent to ${FIDUCIARY.name}'s Grievance Officer. If it isn't resolved by the SLA date, you can escalate it to the Data Protection Board.`,
+    // "Recorded and assigned", never "sent". This package has no outbound
+    // channel - no mail transport, no ticketing integration - so a grievance
+    // is written to a collection and nothing leaves the process. Telling a
+    // data principal it "has been sent" is a false assurance that stops them
+    // following it up, and the SLA date they need in order to escalate was
+    // not even in the sentence.
+    note:
+      `This grievance has been recorded and assigned to ${FIDUCIARY.name}'s Grievance Officer ` +
+      `(${FIDUCIARY.dpoName}). If it is not resolved by ${slaDueAt.toISOString().slice(0, 10)}, ` +
+      `you may escalate it to the Data Protection Board.`,
   };
 }
 
@@ -60,6 +69,12 @@ async function complaintToTheBoard({ models, principalId, subject, description }
  * endpoint into an existence oracle for other principals' GR- references.
  * The router takes principalId from resolvePrincipal, never from the
  * request.
+ *
+ * @param {object} input
+ * @param {object} input.models      - model registry, must include Grievance
+ * @param {string} input.refId       - the GR- reference returned when it was filed
+ * @param {string} input.principalId - the owner, from resolvePrincipal
+ * @returns {Promise<{ refId: string, status: string, escalatedAt: Date }>}
  */
 async function escalateToBoard({ models, refId, principalId } = {}) {
   assertNonEmptyString(refId, "refId", 64);

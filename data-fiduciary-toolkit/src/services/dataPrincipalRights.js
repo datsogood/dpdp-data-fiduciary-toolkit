@@ -3,7 +3,7 @@ const { generateDocRef } = require("../utils/principalId");
 const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
 
-/** Powers the "Data Principal Rights" page — just the static catalog, Chapter III. */
+/** Powers the "Data Principal Rights" page - just the static catalog, Chapter III. */
 function listRights() {
   return RIGHTS_CATALOG;
 }
@@ -74,8 +74,12 @@ async function exerciseRight({ models, principalId, right, details = "" } = {}) 
 async function listRightsRequests({ models, principalId }) {
   assertPrincipalId(principalId);
   const rows = await models.RightsRequest.find({ principalId }).sort({ createdAt: -1 }).limit(200).lean();
-  return rows.map(({ refId, right, details, status, resolution, createdAt, updatedAt }) => ({
-    refId, right, details, status, resolution, createdAt, updatedAt,
+  // slaDueAt is projected for the same reason listGrievances projects it: the
+  // due date is exactly what tells a data principal their request is overdue
+  // and it is time to chase it. Withholding it left them able to see that a
+  // request was "received" and nothing about when an answer was owed.
+  return rows.map(({ refId, right, details, status, slaDueAt, resolution, createdAt, updatedAt }) => ({
+    refId, right, details, status, slaDueAt, resolution, createdAt, updatedAt,
   }));
 }
 
@@ -92,8 +96,8 @@ async function getRightsRequest({ models, principalId, refId }) {
   assertNonEmptyString(refId, "refId", 64);
   const row = await models.RightsRequest.findOne({ principalId, refId }).lean();
   if (!row) throw new AppError("No rights request found with that reference", 404);
-  const { right, details, status, resolution, createdAt, updatedAt } = row;
-  return { refId, right, details, status, resolution, createdAt, updatedAt };
+  const { right, details, status, slaDueAt, resolution, createdAt, updatedAt } = row;
+  return { refId, right, details, status, slaDueAt, resolution, createdAt, updatedAt };
 }
 
 module.exports = { listRights, exerciseRight, listRightsRequests, getRightsRequest };

@@ -12,6 +12,44 @@ const FIDUCIARY = {
   rightsSlaDays: Number(process.env.RIGHTS_SLA_DAYS || 30),
 };
 
+// A DPO address that is a placeholder is worse than no address at all: the
+// grievance page renders it to data principals, so the fiduciary looks like it
+// has published Grievance Officer contact details while every complaint sent
+// there goes nowhere.
+const PLACEHOLDER_EMAILS = ["dpo@example.com", ""];
+
+function assertPositiveInteger(value, envName) {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${envName} must be a positive integer, got: ${process.env[envName]}`);
+  }
+}
+
+/**
+ * Fails fast on configuration that would be shown to a data principal.
+ *
+ * A grievance page telling people to contact dpo@example.com fails the duty
+ * to publish valid Grievance Officer contact details while looking like it
+ * satisfies it - so this is a startup error, not a warning. Likewise a
+ * non-integer SLA: Number("seven") is NaN, which makes every slaDueAt an
+ * Invalid Date and fails every grievance at the moment someone tries to file
+ * one. Failing to boot is loud, immediate, and fixed by one env var; the
+ * alternative fails silently, in front of the data principal.
+ *
+ * Called by createRouter, so a misconfigured deployment never reaches listen().
+ */
+function assertConfigured() {
+  if (PLACEHOLDER_EMAILS.includes(FIDUCIARY.dpoEmail)) {
+    throw new Error(
+      "FIDUCIARY_DPO_EMAIL is unset or still the placeholder (dpo@example.com). " +
+        "The Act requires published, valid Grievance Officer contact details - set it before serving traffic."
+    );
+  }
+  assertPositiveInteger(FIDUCIARY.grievanceSlaDays, "GRIEVANCE_SLA_DAYS");
+  // Same defect, same consequence: exerciseRight builds slaDueAt from this,
+  // and an Invalid Date fails the RightsRequest schema on save.
+  assertPositiveInteger(FIDUCIARY.rightsSlaDays, "RIGHTS_SLA_DAYS");
+}
+
 // ---------------------------------------------------------------------------
 // Consent catalog - the purposes this fiduciary processes personal data for.
 //
@@ -146,6 +184,7 @@ const contactBlock = () => ({ dpoName: FIDUCIARY.dpoName, dpoEmail: FIDUCIARY.dp
 
 module.exports = {
   FIDUCIARY,
+  assertConfigured,
   contactBlock,
   // Functions - always read the catalog live, so a runtime customisation is
   // reflected immediately rather than needing a process restart (M3).

@@ -64,6 +64,40 @@ main().catch((err) => { console.error(err); process.exit(1); });
 Or run the bundled example: `npm run example` (needs a Mongo instance at
 `MONGO_URI`).
 
+### Configuration is checked at boot
+
+`createRouter` calls `assertConfigured()` before it builds a single route, so a
+deployment that still carries the `dpo@example.com` placeholder, or a
+`GRIEVANCE_SLA_DAYS` / `RIGHTS_SLA_DAYS` that is not a positive integer, throws
+at startup instead of reaching `listen()`. A placeholder Grievance Officer
+address is worse than none: the grievance page publishes it, so the fiduciary
+looks like it has met the duty to publish valid contact details while every
+complaint sent there goes nowhere.
+
+### Cross-site request forgery
+
+`resolvePrincipal` means the host supplies the credential, and in most
+deployments that credential is a session cookie - which a browser attaches to a
+cross-site form POST as readily as to your own. This router therefore refuses
+any non-GET request whose `Origin` (or, failing that, `Referer`) names a host
+other than the one the request arrived on. A request carrying neither header is
+allowed through, because `curl` and server-to-server clients send neither and a
+browser cannot omit `Origin` on a state-changing method.
+
+Two things this does not do, and you must:
+
+- **Set `SameSite=Lax` or `SameSite=Strict` on your session cookie.** The
+  origin check is a second line, not a replacement. This library owns no
+  session store - by design - so it cannot issue CSRF tokens.
+- **Set `allowedOrigins` if your browser origin is not the `Host` this router
+  sees** - a reverse proxy that rewrites `Host`, or a front end served from a
+  separate origin. Supplying it *replaces* the same-host default, so list your
+  own origin too:
+
+  ```js
+  createRouter({ db, resolvePrincipal, allowedOrigins: ["https://app.example", "https://portal.example"] })
+  ```
+
 ## The five APIs
 
 ### 1. `persistPIIwithconsent` — `POST /consent`
@@ -115,7 +149,8 @@ POST /rights/exercise
 fiduciary's own Grievance Officer — the Data Protection Board only hears it
 if that's not resolved in time. So this opens a form addressed to your DPO
 (set via `FIDUCIARY_DPO_NAME`/`FIDUCIARY_DPO_EMAIL`) and starts an SLA clock
-(`GRIEVANCE_SLA_DAYS`, default 7). A separate `escalateToBoard(refId)` /
+(`GRIEVANCE_SLA_DAYS`, default 7). A separate
+`escalateToBoard({ refId, principalId })` /
 `POST /grievance/:refId/escalate` is provided for once that SLA lapses
 unresolved — it's blocked from firing early.
 

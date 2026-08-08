@@ -1,6 +1,7 @@
 const express = require("express");
 
 const { buildModels } = require("../models");
+const { assertConfigured } = require("../config/catalog");
 const { AppError } = require("../utils/errors");
 const { findPrincipalByContact, findPrincipalById, lookupHash } = require("../utils/principalId");
 const persistPIIwithconsent = require("../services/persistPIIwithconsent");
@@ -11,7 +12,8 @@ const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = requ
 const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
 const { listConsentManagerRequests } = consentManagerRequest;
-const { renderRightsPage, renderGrievanceForm, renderConsentManagerForm } = require("./forms");
+const { escapeHtml, renderRightsPage, renderGrievanceForm, renderConsentManagerForm } = require("./forms");
+const { wantsHtml } = require("./negotiate");
 
 /**
  * An HTML checkbox group sends one value as a string and two as an array, so a
@@ -73,17 +75,87 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
  *   A throw here is logged and does NOT fail the request - the grievance is
  *   already filed, and failing the response would cost the principal their refId
  *   and produce a duplicate filing. Notification is not the filing.
+ * @param {string[]} [opts.allowedOrigins] - origins permitted to make a
+ *   state-changing request. Default `[]` means "the same host the request
+ *   arrived on". Setting it REPLACES that default, so list your own origin too
+ *   if you list anything at all. Needed when the browser origin and the
+ *   `Host` this router sees differ - a reverse proxy that rewrites `Host`, or
+ *   a front end served from a separate origin.
  */
-function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } = {}) {
+function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, allowedOrigins = [] } = {}) {
   if (!db || typeof db.model !== "function") {
     throw new Error("db is required - pass the connection returned by connect()");
   }
+  if (!Array.isArray(allowedOrigins) || allowedOrigins.some((o) => typeof o !== "string")) {
+    throw new Error("allowedOrigins must be an array of origin strings, e.g. [\"https://app.example\"]");
+  }
+  // Before any route is built, so a deployment carrying a placeholder DPO
+  // address or a NaN SLA fails at boot rather than in front of a data
+  // principal who is trying to complain.
+  assertConfigured();
   const models = buildModels(db);
   const router = express.Router();
   router.use(express.json({ limit: "100kb" }));
   // extended:true is what let a cross-origin form build principalId[$ne].
   // extended:false produces only string values, removing that delivery path.
   router.use(express.urlencoded({ extended: false, limit: "100kb" }));
+
+  /**
+   * Same-origin check on state-changing requests.
+   *
+   * The original audit refuted a CSRF finding, and correctly: with no ambient
+   * credential, a cross-site POST conferred nothing an attacker could not
+   * already do with curl. resolvePrincipal changed that. Hosts back it with a
+   * cookie session, and POST /consent/withdraw exists precisely so an HTML
+   * form can reach it - so a cross-site form POST now rides that cookie, and
+   * a forged withdrawal writes to an append-only ledger that cannot be undone.
+   *
+   * Not a substitute for CSRF tokens, which this library cannot issue - it has
+   * no session store, by design, which is the whole point of the injected
+   * hook. But the Fetch specification requires a browser to send Origin on
+   * every request whose method is not GET or HEAD, so rejecting a mismatched
+   * one closes the drive-by case. The absence of BOTH headers is treated as
+   * same-origin because non-browser clients (curl, server-to-server) send
+   * neither and are not the threat here; a browser cannot reach that branch.
+   *
+   * A referrer policy can reduce Origin to the literal string "null" rather
+   * than remove it. That parses as neither a URL nor a host, so it lands in
+   * the 403 below - which is right: "null" is evidence of a cross-origin or
+   * sandboxed context, not of a same-origin one.
+   *
+   * Only the host is compared, not the scheme: req.get("host") carries no
+   * scheme, and deriving one from req.protocol would depend on the host's
+   * trust-proxy setting, which this library does not control.
+   *
+   * Hosts must still set SameSite=Lax or Strict on their session cookie -
+   * see the README. This alone is not enough.
+   */
+  function checkOrigin(req, res, next) {
+    if (req.method === "GET" || req.method === "HEAD") return next();
+    const origin = req.get("origin") || req.get("referer");
+    if (!origin) return next();
+
+    let host;
+    try {
+      host = new URL(origin).host;
+    } catch {
+      return res.status(403).json({ error: "bad origin" });
+    }
+    const allowed = allowedOrigins.length
+      ? allowedOrigins.some((o) => {
+          try {
+            return new URL(o).host === host;
+          } catch {
+            return o === host;
+          }
+        })
+      : host === req.get("host");
+    if (!allowed) return res.status(403).json({ error: "cross-origin request refused" });
+    next();
+  }
+  // Before every route, and before requireAuth: a forged request is refused
+  // without consulting the session at all.
+  router.use(checkOrigin);
 
   /**
    * Identity comes only from the host application. principalId is never read
@@ -261,7 +333,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
 
   // Public: the catalog is static information about rights everyone holds.
   router.get("/rights", (req, res) => {
-    if (req.accepts("html")) return res.type("html").send(renderRightsPage());
+    if (wantsHtml(req)) return res.type("html").send(renderRightsPage({ basePath: req.baseUrl }));
     res.json(listRights());
   });
 
@@ -275,8 +347,13 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
         right: req.body.right,
         details: req.body.details,
       });
-      if (req.accepts("html")) {
-        return res.type("html").send(`<p>Request received. Reference: <b>${result.refId}</b></p>`);
+      // Same status either way - a browser is not a reason to report 200 for
+      // something that was created.
+      if (wantsHtml(req)) {
+        return res
+          .status(201)
+          .type("html")
+          .send(`<p>Request received. Reference: <b>${escapeHtml(result.refId)}</b></p>`);
       }
       res.status(201).json(result);
     })
@@ -307,7 +384,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   // ---------------------------------------------------------------------------
 
   // Public: the form itself reveals nothing.
-  router.get("/grievance/new", (req, res) => res.type("html").send(renderGrievanceForm()));
+  router.get("/grievance/new", (req, res) => res.type("html").send(renderGrievanceForm({ basePath: req.baseUrl })));
 
   router.post(
     "/grievance",
@@ -330,11 +407,16 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
           console.error("[dpdp-toolkit] onGrievanceFiled threw after the grievance was filed:", hookErr);
         }
       }
-      if (req.accepts("html")) {
+      // "Recorded", not "sent": this package has no outbound channel, and
+      // telling a data principal their complaint was delivered when it was
+      // only written to a collection is the same false assurance H7 names.
+      if (wantsHtml(req)) {
         return res
+          .status(201)
           .type("html")
           .send(
-            `<p>Sent to ${result.addressedTo}. Reference: <b>${result.refId}</b>. SLA: ${result.slaDueAt}</p>`
+            `<p>Recorded for ${escapeHtml(result.addressedTo)}. Reference: <b>${escapeHtml(result.refId)}</b>. ` +
+              `Due for resolution by ${escapeHtml(result.slaDueAt.toISOString().slice(0, 10))}.</p>`
           );
       }
       res.status(201).json(result);
@@ -379,7 +461,9 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   // ---------------------------------------------------------------------------
 
   // Public: the form itself reveals nothing.
-  router.get("/consent-manager/new", (req, res) => res.type("html").send(renderConsentManagerForm()));
+  router.get("/consent-manager/new", (req, res) =>
+    res.type("html").send(renderConsentManagerForm({ basePath: req.baseUrl }))
+  );
 
   router.post(
     "/consent-manager",
@@ -391,8 +475,11 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
         message: req.body.message,
         preferredConsentManager: req.body.preferredConsentManager,
       });
-      if (req.accepts("html")) {
-        return res.type("html").send(`<p>Request received. Reference: <b>${result.refId}</b></p>`);
+      if (wantsHtml(req)) {
+        return res
+          .status(201)
+          .type("html")
+          .send(`<p>Request received. Reference: <b>${escapeHtml(result.refId)}</b></p>`);
       }
       res.status(201).json(result);
     })
