@@ -82,6 +82,47 @@ test("correcting an email keeps the same principalId, via the authenticated path
   });
 });
 
+test("an email correction runs its clash check under PRODUCTION query semantics", async () => {
+  // withDb builds its connection through connect(), so sanitizeFilter is on
+  // here exactly as it is in production. It rewrites an operator filter -
+  // { principalId: { $ne: principalId } } - into { $eq: { $ne: ... } }, and
+  // casting that object onto a String path throws CastError. Under that
+  // setting the clash check threw on every real correction, the router
+  // reported it as "400 Invalid value for: principalId" naming a field the
+  // caller never supplied, and the documented 409 never ran at all.
+  //
+  // The two assertions below therefore have to hold TOGETHER: the correction
+  // succeeds, and a genuine clash is still refused. An implementation that
+  // simply dropped the check would pass the first and fail the second.
+  await withDb(async (conn) => {
+    assert.equal(conn.get("sanitizeFilter"), true,
+      "the harness must run under the same query semantics as connect() gives production");
+
+    const models = buildModels(conn);
+    const a = await findOrCreatePrincipal({ models, pii: { name: "Asha", email: "asha@example.com" } });
+    const b = await findOrCreatePrincipal({ models, pii: { name: "Riya", email: "riya@example.com" } });
+
+    const moved = await updatePrincipalContact({
+      models, principalId: a.principal.principalId, pii: { email: "asha.new@example.com" },
+    });
+    assert.equal(moved.pii.email, "asha.new@example.com", "a correction must not throw a CastError");
+    assert.equal(moved.principalId, a.principal.principalId);
+
+    await assert.rejects(
+      () => updatePrincipalContact({
+        models, principalId: a.principal.principalId, pii: { email: "riya@example.com" },
+      }),
+      (e) => e.status === 409,
+      "the clash check must actually EXECUTE, not be dropped along with the operator"
+    );
+    assert.equal(
+      (await models.Principal.findOne({ principalId: b.principal.principalId })).pii.email,
+      "riya@example.com",
+      "the refused correction must leave the other principal untouched"
+    );
+  });
+});
+
 test("a contact correction cannot steal another principal's email", async () => {
   await withDb(async (conn) => {
     const models = buildModels(conn);

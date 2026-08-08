@@ -183,8 +183,20 @@ async function updatePrincipalContact({ models, principalId, pii }) {
     const hash = lookupHash(pii.email);
     // Resubmitting your own unchanged email is never a clash.
     if (principal.emailHash !== hash) {
-      const clash = await models.Principal.findOne({ emailHash: hash, principalId: { $ne: principalId } });
-      if (clash) throw new AppError("That email is already registered to another data principal", 409);
+      // NO query operator here, deliberately. connect() sets sanitizeFilter on
+      // every connection this library opens, which rewrites { $ne: x } into
+      // { $eq: { $ne: x } } - and casting that object onto a String path
+      // throws CastError. So the previous { principalId: { $ne: principalId } }
+      // filter made EVERY real email correction throw, which the router's
+      // error mapper reported as "400 Invalid value for: principalId", naming
+      // a field the caller never supplied, and the documented 409-on-clash
+      // guarantee below never executed at all. emailHash is unique, so at most
+      // one document can match; comparing the id in JavaScript needs no
+      // operator and cannot be rewritten out from under us.
+      const clash = await models.Principal.findOne({ emailHash: hash });
+      if (clash && clash.principalId !== principalId) {
+        throw new AppError("That email is already registered to another data principal", 409);
+      }
       principal.emailHash = hash;
     }
   }

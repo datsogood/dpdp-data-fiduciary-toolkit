@@ -288,6 +288,7 @@ test("a household sharing a handset cannot have an update land on the wrong memb
     const models = buildModels(conn);
     const { call, close } = await app(conn);
     let phoneOnly;
+    let housemate;
     try {
       // A phone-only principal, then a second member of the household who
       // registers the same handset with an email. phoneHash is deliberately
@@ -305,6 +306,12 @@ test("a household sharing a handset cannot have an update land on the wrong memb
         consentTypes: ["analytics"],
       });
       assert.equal(second.status, 201);
+      // Taken from the response rather than found with { $ne: phoneOnly }: the
+      // harness now builds its connection through connect(), so sanitizeFilter
+      // is on here exactly as it is in production and an operator filter
+      // CastErrors. That is the point - a test query the shipped library could
+      // not execute is not testing the shipped library.
+      housemate = (await second.json()).principalId;
     } finally {
       await close();
     }
@@ -312,7 +319,8 @@ test("a household sharing a handset cannot have an update land on the wrong memb
     // Snapshot rather than assert on one event type: Riya's own signup already
     // recorded underwriting as "denied", so counting that type would fail on
     // her own history rather than on anything Asha's update did.
-    const housemateBefore = await models.ConsentRecord.findOne({ principalId: { $ne: phoneOnly } }).lean();
+    assert.notEqual(housemate, phoneOnly);
+    const housemateBefore = await models.ConsentRecord.findOne({ principalId: housemate }).lean();
 
     const { call: asAsha, close: closeAsha } = await app(conn, { resolvePrincipal: () => phoneOnly });
     try {
