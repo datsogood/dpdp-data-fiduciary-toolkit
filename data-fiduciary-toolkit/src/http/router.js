@@ -20,6 +20,7 @@ const {
   renderConsentPage,
   renderConsentReceipt,
   renderWithdrawalPage,
+  renderWithdrawalReceipt,
 } = require("./forms");
 const { wantsHtml } = require("./negotiate");
 
@@ -295,8 +296,12 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       });
       // The receipt page is how a browser user obtains their principalId at
       // all - it is otherwise only ever returned in a JSON body, which is
-      // unusable to someone without API access.
+      // unusable to someone without API access. no-store: the page displays
+      // the identifier itself in a field the user is invited to copy, the
+      // same reasoning that puts no-store on GET /consent below.
       if (wantsHtml(req)) {
+        res.set("Cache-Control", "no-store");
+        res.set("Vary", "Cookie");
         return res.status(201).type("html").send(renderConsentReceipt({ basePath: req.baseUrl, result }));
       }
       res.status(201).json(result);
@@ -355,6 +360,16 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       consentTypes: asArray(req.body.consentTypes),
       onWithdrawal,
     });
+    // Same reasoning as the consent receipt above: withdrawal must be as easy
+    // as granting, so a browser gets a page, not a JSON blob, and the same
+    // no-store treatment - this response reveals which purposes are now
+    // withdrawn, exactly the kind of principal-identifying state GET
+    // /consent and GET /consent/withdraw are already never cached.
+    if (wantsHtml(req)) {
+      res.set("Cache-Control", "no-store");
+      res.set("Vary", "Cookie");
+      return res.status(200).type("html").send(renderWithdrawalReceipt({ basePath: req.baseUrl, result }));
+    }
     res.status(200).json(result);
   });
   router.put("/consent/withdraw", requireAuth, withdraw);

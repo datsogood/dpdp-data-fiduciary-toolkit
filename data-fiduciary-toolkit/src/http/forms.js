@@ -230,6 +230,57 @@ function renderWithdrawalPage({ basePath = "", state = {} } = {}) {
   </body></html>`;
 }
 
+/**
+ * The receipt shown right after POST /consent/withdraw succeeds. Without this
+ * a data principal who withdraws lands on raw JSON while one who consents
+ * gets a styled page - backwards for a right the Act requires to be as easy
+ * as granting. States plainly what changed: what was withdrawn (effective
+ * now), what could not be and why (withdrawConsent's own reason text, which
+ * already names the clause a rejected purpose rests on), and what needed no
+ * change - already withdrawn, declined, or never granted is not an error and
+ * must not read like one.
+ */
+function renderWithdrawalReceipt({ basePath = "", result } = {}) {
+  const { withdrawn = [], rejected = [], noChange = [], receiptId, contact } = result;
+
+  const titleOf = (type) => {
+    const entry = getCatalogEntry(type);
+    return entry ? entry.title : type;
+  };
+
+  const withdrawnSection = withdrawn.length
+    ? `<div class="card">
+        <div class="right-title">Withdrawn</div>
+        <p style="font-size:0.85rem;">This takes effect now.</p>
+        <ul>${withdrawn.map((type) => `<li>${escapeHtml(titleOf(type))}</li>`).join("")}</ul>
+      </div>`
+    : "";
+
+  const rejectedSection = rejected.length
+    ? `<div class="card">
+        <div class="right-title">Could not be withdrawn</div>
+        <ul>${rejected.map((r) => `<li>${escapeHtml(titleOf(r.type))} - ${escapeHtml(r.reason)}</li>`).join("")}</ul>
+      </div>`
+    : "";
+
+  const noChangeSection = noChange.length
+    ? `<div class="card">
+        <div class="right-title">No change needed</div>
+        <p style="font-size:0.85rem;">Already withdrawn, declined, or never granted - not an error, there was simply nothing left to do.</p>
+        <ul>${noChange.map((type) => `<li>${escapeHtml(titleOf(type))}</li>`).join("")}</ul>
+      </div>`
+    : "";
+
+  return `<!doctype html><html><head><style>${baseStyle}</style></head><body>
+    <h1>Withdrawal recorded</h1>
+    <p class="lede">Receipt: ${escapeHtml(receiptId)}</p>
+    ${withdrawnSection}
+    ${rejectedSection}
+    ${noChangeSection}
+    <p style="font-size:0.75rem;">Questions? Contact ${escapeHtml(contact.dpoName)} at ${escapeHtml(contact.dpoEmail)}.</p>
+  </body></html>`;
+}
+
 module.exports = {
   escapeHtml,
   renderRightsPage,
@@ -238,4 +289,5 @@ module.exports = {
   renderConsentPage,
   renderConsentReceipt,
   renderWithdrawalPage,
+  renderWithdrawalReceipt,
 };

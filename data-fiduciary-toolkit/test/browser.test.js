@@ -8,6 +8,7 @@ process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
 const { buildModels } = require("../src/models");
 const createRouter = require("../src/http/router");
 const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+const withdrawConsent = require("../src/services/withdrawConsent");
 
 const PII = { name: "Asha", email: "asha@example.com", phone: "9876543210", dob: "1990-04-01" };
 const HTML = { Accept: "text/html" };
@@ -139,6 +140,88 @@ test("a single ticked checkbox is accepted, not rejected as a non-array", async 
         }),
       });
       assert.equal(res.status, 201);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+test("the withdrawal receipt states what was withdrawn, what was refused and why, and what needed no change", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing", "analytics"] });
+    // analytics is already withdrawn BEFORE the form submission below, so the
+    // page has to render it as "no change needed", not as freshly withdrawn.
+    await withdrawConsent({ models, principalId, consentTypes: ["analytics"] });
+
+    const app = express();
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => principalId }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      // marketing is currently granted (withdraws), kyc_reporting rests on
+      // Section 7(d) (refused), analytics is already withdrawn (no change).
+      // URLSearchParams(object) stringifies an array value with commas rather
+      // than repeating the key, so the three checkboxes are appended
+      // individually - exactly how a browser serialises three ticked boxes
+      // sharing one name.
+      const body = new URLSearchParams();
+      body.append("consentSubmitted", "1");
+      body.append("consentTypes", "marketing");
+      body.append("consentTypes", "kyc_reporting");
+      body.append("consentTypes", "analytics");
+      const res = await fetch(`http://localhost:${port}/dpdp/consent/withdraw`, {
+        method: "POST",
+        headers: { ...HTML, "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      });
+      assert.equal(res.status, 200, "a form POST must reach a real route, not 404");
+      assert.match(res.headers.get("content-type"), /text\/html/, "a browser must get a page, not JSON");
+
+      const html = await res.text();
+      assert.match(html, /Withdrawn/);
+      assert.match(html, /Marketing and personalised offers/, "the withdrawn purpose is named");
+      assert.match(html, /Could not be withdrawn/);
+      assert.match(html, /Anti-money-laundering reporting/, "the refused purpose is named");
+      assert.match(html, /Section 7\(d\)/, "the refusal states the clause it rests on, not just that it was refused");
+      assert.match(html, /No change needed/);
+      assert.match(html, /Product analytics and improvement/, "the already-withdrawn purpose is named");
+      assert.match(html, /not an error/i, "an already-withdrawn purpose must be stated as a non-error, not left to read like one");
+
+      const record = await models.ConsentRecord.findOne({ principalId });
+      const state = record.currentState();
+      assert.equal(state.marketing.status, "withdrawn");
+      assert.equal(state.analytics.status, "withdrawn");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+test("both receipt pages carry Cache-Control: no-store - they show or reveal principal-identifying state", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const app = express();
+    let principalId;
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => principalId }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      const consentRes = await fetch(`http://localhost:${port}/dpdp/consent`, {
+        method: "POST",
+        headers: { ...HTML, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ name: "Cache", email: "cache@example.com", phone: "9222222222", dob: "1990-04-01", consentSubmitted: "1", consentTypes: "marketing" }),
+      });
+      assert.equal(consentRes.headers.get("cache-control"), "no-store");
+      const html = await consentRes.text();
+      principalId = html.match(/[a-f0-9]{64}/)[0];
+
+      const withdrawRes = await fetch(`http://localhost:${port}/dpdp/consent/withdraw`, {
+        method: "POST",
+        headers: { ...HTML, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ consentSubmitted: "1", consentTypes: "marketing" }),
+      });
+      assert.equal(withdrawRes.headers.get("cache-control"), "no-store");
     } finally {
       await new Promise((r) => server.close(r));
     }
