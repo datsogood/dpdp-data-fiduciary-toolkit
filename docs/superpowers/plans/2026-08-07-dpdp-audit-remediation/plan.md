@@ -2307,8 +2307,19 @@ const { AppError } = require("../utils/errors");
  * @param {string[]} [input.consentTypes] - omit entirely for a PII-only update
  * @param {boolean}  [input.regrant]      - allow reversing a prior withdrawal
  * @param {object}   [input.notice]       - Section 5 notice snapshot (Task 8)
+ * @param {string}   [input.principalId]  - when the caller ALREADY knows who this
+ *   is (an authenticated update), pass it and skip contact-hash resolution
+ *   entirely. Without it this function re-derives identity from pii via
+ *   findOrCreatePrincipal, which is right for signup and wrong for an update:
+ *   phoneHash is deliberately non-unique, so a household sharing a handset can
+ *   have two candidate documents and the winner is decided by insertion order
+ *   rather than by anything asserted. Worse, if PRINCIPAL_ID_SECRET is ever
+ *   rotated, every stored emailHash goes stale and an authenticated update
+ *   would MINT A NEW PRINCIPAL carrying the old one's PII, return the new id to
+ *   the caller, and append the consent event to a forked ledger, orphaning the
+ *   original record with live PII.
  */
-async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice } = {}) {
+async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, principalId } = {}) {
   // Omission means "no consent decision was made"; an empty ARRAY means "I
   // decline everything". null must count as omission, not as a decline:
   // assertStringArray maps both undefined and null to [], so treating null as a
@@ -2322,8 +2333,17 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
   const unknown = chosen.filter((t) => !getValidConsentTypes().includes(t));
   if (unknown.length) throw new AppError(`Unknown consent type(s): ${unknown.join(", ")}`, 400);
 
-  const { principal, created } = await findOrCreatePrincipal({ models, pii });
-  const principalId = principal.principalId;
+  // An authenticated caller already knows the principal. Resolve by id and
+  // never by contact hash - see the principalId param note above.
+  let principal;
+  let created = false;
+  if (principalId) {
+    principal = await models.Principal.findOne({ principalId });
+    if (!principal) throw new AppError("No principal found for that id", 404);
+  } else {
+    ({ principal, created } = await findOrCreatePrincipal({ models, pii }));
+    principalId = principal.principalId;
+  }
   const now = new Date();
   const receiptId = generateDocRef("RC");
 
@@ -3420,7 +3440,7 @@ Claude-Session: https://claude.ai/code/session_01XmUWwPHKGBfo77jnx1yw3K"
 
 ### Task 12: HTTP layer - negotiation, errors, config validation, hooks
 
-**Closes:** H5, H7, M1, M2, M6, M11, L2
+**Closes:** H5, H7, M1, M2, M11, L2, and the CSRF gap that Task 5 creates
 
 **Files:**
 - Create: `src/http/negotiate.js`
@@ -3640,6 +3660,50 @@ function assertConfigured() {
 - [ ] **Step 5: (moved) The error mapper now lands in T5 Step 3d**
 
 M6 is closed by T5 Step 3d, which installs the single error middleware when the router is rewritten - several of T5's own tests depend on `AppError` statuses reaching the client, so it could not wait until here. **Do not add a second error middleware.** Verify T5's version is present and registered after all routes, and confirm no per-route `catch` block remains that swallows an error into a `res.status(400)`. If you find one, fix it here and say so in your report.
+
+- [ ] **Step 5b: Add an Origin check to the mutating routes - CSRF is now a live gap**
+
+The original audit **refuted** a CSRF finding, and correctly: with no ambient credential, a cross-site POST conferred nothing an attacker could not already do with curl. Task 5 changed that. Now that `resolvePrincipal` exists and hosts will back it with a cookie session, a cross-site form POST rides that cookie - and `POST /consent/withdraw` exists precisely so an HTML form can reach it. A forged withdrawal writes to an append-only ledger and cannot be undone.
+
+This library cannot issue CSRF tokens: it owns no session store, which is the whole point of the injected hook. What it can do is reject a state-changing request whose `Origin` does not match, which needs no session knowledge:
+
+```js
+/**
+ * Same-origin check on state-changing requests.
+ *
+ * Not a substitute for CSRF tokens, which this library cannot issue - it has
+ * no session store, by design. But a cross-site form POST always carries an
+ * Origin, so rejecting a mismatched one closes the drive-by case, and the
+ * absence of both headers is treated as same-origin because non-browser
+ * clients (curl, server-to-server) send neither and are not the threat here.
+ *
+ * Hosts must still set SameSite=Lax or Strict on their session cookie. Say so
+ * in the README rather than implying this alone is enough.
+ */
+function checkOrigin(req, res, next) {
+  if (req.method === "GET" || req.method === "HEAD") return next();
+  const origin = req.get("origin") || req.get("referer");
+  if (!origin) return next();
+
+  let host;
+  try {
+    host = new URL(origin).host;
+  } catch {
+    return res.status(403).json({ error: "bad origin" });
+  }
+  const allowed = allowedOrigins.length
+    ? allowedOrigins.some((o) => { try { return new URL(o).host === host; } catch { return o === host; } })
+    : host === req.get("host");
+  if (!allowed) return res.status(403).json({ error: "cross-origin request refused" });
+  next();
+}
+```
+
+`createRouter` gains an `allowedOrigins` option (default `[]`, meaning "same host as the request"). Register `checkOrigin` before the routes.
+
+Tests: a `POST /consent/withdraw` carrying `Origin: https://evil.example` is refused with 403 and **the ledger is unchanged**; the same request with a matching Origin succeeds; a request with no Origin at all still succeeds so API clients are unaffected; and an explicitly configured `allowedOrigins` entry is honoured.
+
+This must land before Task 13 renders a withdrawal form.
 
 - [ ] **Step 6: Make forms mount-relative (M1) and fix the copy (H7)**
 

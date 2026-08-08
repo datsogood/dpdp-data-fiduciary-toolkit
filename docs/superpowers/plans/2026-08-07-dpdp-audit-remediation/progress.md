@@ -314,3 +314,45 @@ PROCESS NOTE: the age-gate bug needed all four layers to catch. My plan had the 
   diagnosed the real root cause (dob is a calendar date, asOf is an instant - they must be read
   in different frames). Standing rule now in the plan: timezone and boundary claims need a
   subprocess test, not an argument.
+
+Task 5: implementer DONE_WITH_CONCERNS, 77/77 (65 baseline + 12 new). Was interrupted mid-task
+  by an API error; resumed with context intact. It correctly reported that the interruption
+  landed mid-complaintToTheBoard.js with the AppError edits on disk but the escalateToBoard
+  ownership check not yet written, and reconstructed it from the brief rather than guessing -
+  the reviewer independently confirmed the file is complete and shows no half-edit.
+Task 5: task review (opus) APPROVED. All four C1 properties VERIFIED from code:
+   1. the 409 fires before any write (findPrincipalByContact at router.js:138, throw at :139,
+      service not reached until :142) and its guarding test is non-vacuous - full document
+      comparison plus a positive pii.name assertion plus countDocuments
+   2. PUT /consent passes principal.pii.toObject(), the STORED record, so no payload path can
+      redirect the write; assertOwnContact 403s a mismatch
+   3. default-deny on all seven mutating routes; POST /consent is the only unauthenticated one
+   4. resolvePrincipal is awaited, with a throw mapped to 401 not 500
+  Reviewer also confirmed by grep that NO route anywhere reads principalId from body, query or
+  params, and that ownership is checked before status in escalateToBoard, closing a status
+  oracle the brief never asked about.
+Task 5: 1 Important, subtle and genuinely new - PUT /consent resolves identity TWICE. It loads
+  by req.principalId, then discards that and lets persistPIIwithconsent re-derive by contact
+  hash. phoneHash is deliberately non-unique, so the query can have two candidates and the
+  winner is decided by MongoDB insertion order, not by anything asserted. Probed and currently
+  correct - but only incidentally. Deterministic trigger needing no collision: rotate
+  PRINCIPAL_ID_SECRET, every emailHash goes stale, and an authenticated update MINTS A NEW
+  PRINCIPAL with the old one's PII, returns the new id, and forks the ledger.
+  Took the structural fix over the assertion: persistPIIwithconsent gains an optional
+  principalId that short-circuits findOrCreatePrincipal. Plan updated, briefs 5 and 7 regenerated.
+Task 5: NEW FINDING WITH AN OWNER - CSRF. The original audit REFUTED a CSRF finding, correctly:
+  with no ambient credential a cross-site POST conferred nothing curl could not. Task 5 changes
+  that - resolvePrincipal will be cookie-backed, and POST /consent/withdraw exists so an HTML
+  form can reach it. A forged withdrawal writes to an append-only ledger. The library cannot
+  issue CSRF tokens (it owns no session store, by design), so T12 gains an Origin check plus
+  README guidance that hosts must set SameSite. Must land before T13 renders a form.
+  This is the audit's own section 6 prediction coming true: "becomes a real finding the moment
+  C1 is fixed with cookie-based sessions".
+Task 5: fix round 1/5 dispatched (1 Important + 4 minors: vacuous body-principalId test,
+  missing urlencoded withdrawal test, onGrievanceFiled throw loses the refId, narrow
+  victim-ledger assertion)
+Task 5: minor (deferred) -> T13: GET /consent/new and GET /consent/withdraw are in the brief's
+  route table but not implemented. GET /consent is T10's. Confirm T13 claims the other two.
+Task 5: minor (deferred) -> T14: mongod-per-withDb flake, one port-bind failure in five runs.
+  Reviewer's point is right that flake rate scales with every task that adds tests, and a suite
+  failing 20% of the time trains people to re-run rather than read.

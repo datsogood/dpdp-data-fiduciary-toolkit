@@ -211,8 +211,19 @@ const { AppError } = require("../utils/errors");
  * @param {string[]} [input.consentTypes] - omit entirely for a PII-only update
  * @param {boolean}  [input.regrant]      - allow reversing a prior withdrawal
  * @param {object}   [input.notice]       - Section 5 notice snapshot (Task 8)
+ * @param {string}   [input.principalId]  - when the caller ALREADY knows who this
+ *   is (an authenticated update), pass it and skip contact-hash resolution
+ *   entirely. Without it this function re-derives identity from pii via
+ *   findOrCreatePrincipal, which is right for signup and wrong for an update:
+ *   phoneHash is deliberately non-unique, so a household sharing a handset can
+ *   have two candidate documents and the winner is decided by insertion order
+ *   rather than by anything asserted. Worse, if PRINCIPAL_ID_SECRET is ever
+ *   rotated, every stored emailHash goes stale and an authenticated update
+ *   would MINT A NEW PRINCIPAL carrying the old one's PII, return the new id to
+ *   the caller, and append the consent event to a forked ledger, orphaning the
+ *   original record with live PII.
  */
-async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice } = {}) {
+async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, principalId } = {}) {
   // Omission means "no consent decision was made"; an empty ARRAY means "I
   // decline everything". null must count as omission, not as a decline:
   // assertStringArray maps both undefined and null to [], so treating null as a
@@ -226,8 +237,17 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
   const unknown = chosen.filter((t) => !getValidConsentTypes().includes(t));
   if (unknown.length) throw new AppError(`Unknown consent type(s): ${unknown.join(", ")}`, 400);
 
-  const { principal, created } = await findOrCreatePrincipal({ models, pii });
-  const principalId = principal.principalId;
+  // An authenticated caller already knows the principal. Resolve by id and
+  // never by contact hash - see the principalId param note above.
+  let principal;
+  let created = false;
+  if (principalId) {
+    principal = await models.Principal.findOne({ principalId });
+    if (!principal) throw new AppError("No principal found for that id", 404);
+  } else {
+    ({ principal, created } = await findOrCreatePrincipal({ models, pii }));
+    principalId = principal.principalId;
+  }
   const now = new Date();
   const receiptId = generateDocRef("RC");
 
