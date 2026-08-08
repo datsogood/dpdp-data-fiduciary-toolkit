@@ -357,3 +357,155 @@ hold the PR for.
 5. **Process note.** Every RED check in this report was produced by reverting the fix on
    disk, running the affected file, and restoring from a backup copy taken first. No
    suite run overlapped another; the three final runs were sequential.
+
+---
+
+## Post-review hardening
+
+The re-review that passed all nine fixes above found two defects the fix wave itself
+introduced, plus one residual worth documenting rather than fixing. Baseline for this
+round: 158 tests. Final: 159, passing on two consecutive clean runs (~25-26s each) after
+two transient `mongodb-memory-server` "Port already in use" failures on unrelated,
+untouched test files (`test/connection.test.js`, `test/readpath.test.js`) - the exact
+contention the branch had already flagged, not a regression from this round. Every
+`node --test` invocation below was run alone, never overlapping another.
+
+### A. `requireAuth`'s 401 was JSON-only, so the consent page's own withdrawal link dead-ended
+
+**The defect.** Fix 8 (above) gave `GET /consent/new` a link to `/consent/withdraw` -
+correctly, since `renderConsentPage` renders the whole notice object including
+`notice.withdrawal.path`. But `/consent/withdraw` sits behind `requireAuth`, and
+`requireAuth`'s three `res.status(401).json(...)` call sites (covering four logical
+failure paths: no `resolvePrincipal` configured, `resolvePrincipal` throwing, and
+`resolvePrincipal` resolving to a non-string or to a string that fails the hex-64 shape
+check) never negotiated content type. `GET /consent/new` is the one deliberately
+unauthenticated page in the toolkit - a signed-out visitor has no `principalId` yet - so
+clicking "Withdraw consent" handed that visitor a raw `{"error":"authentication
+required"}` body with `Content-Type: application/json` and nothing to act on. Same shape
+of defect as fix 8's own subject (a rendered page linking to something that fails
+unreadably), reintroduced on the adjacent page by the fix for a different finding.
+
+**Changed.** `src/http/router.js` - a new `sendAuthRequired(req, res)` helper gives all
+three call sites inside `requireAuth` the same `wantsHtml(req)` treatment the error
+mapper's three branches already have. A browser gets a short HTML paragraph saying
+plainly that sign-in is needed, with a link back to `${req.baseUrl}/consent/new` - the one
+page reachable with no session at all, so the visitor is not stranded. The link is built
+with the existing `escapeHtml` (already imported from `./forms`), even though
+`req.baseUrl` is operator-controlled rather than attacker-controlled, matching
+`escapeHtml`'s own stated reasoning for escaping everything interpolated regardless of who
+currently controls it. A JSON client (`Accept: application/json`, or no `Accept` at all -
+`wantsHtml` lists `json` first so it wins the `*/*` wildcard tie-break) is unaffected: same
+`401`, same `{"error": "authentication required"}` body, verified by the existing
+`test/auth.test.js` 401 assertions, which pass unchanged.
+
+**Guarded by.** `test/browser.test.js` - "every link the consent page renders is readable
+when followed signed out, not a raw JSON dead end". Deliberately not "assert 200": it
+fetches every `<a href>` `GET /consent/new` renders, anonymously
+(`resolvePrincipal: () => null`), with `Accept: text/html`, and asserts none of the
+responses carries a JSON content type - `/consent/withdraw` legitimately still 401s for a
+signed-out visitor, and a test demanding 200 there would be wrong. The pre-existing
+consent-page test only asserts the withdrawal href *string* is present in the markup; it
+never fetches it, which is exactly why it did not catch this.
+
+**RED evidence.** Before the fix:
+
+```
+AssertionError [ERR_ASSERTION]: /dpdp/consent/withdraw: a signed-out visitor following
+this link must get a readable page, not raw JSON (status 401)
+  actual: 'application/json; charset=utf-8'
+  expected: /json/
+  operator: 'doesNotMatch'
+```
+
+After the fix: `node --test test/browser.test.js` 11/11 pass. `node --test
+test/auth.test.js` (the file most likely to regress on a `requireAuth` change, since it
+asserts the JSON 401 shape directly for API clients) 18/18 pass, unchanged.
+
+### B. `assertConfigured`'s notice-language gate missed an empty resolved list
+
+**The defect.** Fix 7 (above) made `assertConfigured` refuse any `NOTICE_LANGUAGES` entry
+other than `"en"`, because labelling an English-only notice as another language
+manufactures false Section 5(3) evidence. It did this by filtering
+`SUPPORTED_NOTICE_LANGUAGES` for entries `!== "en"` and refusing only if that filtered list
+was non-empty. A list with zero entries - `NOTICE_LANGUAGES=","` or `NOTICE_LANGUAGES=" "`,
+both of which `config/notice.js`'s `.split(",").map(trim).filter(Boolean)` resolves to
+`[]` - has nothing not-`"en"` to filter out, so it passed. `DEFAULT_NOTICE_LANGUAGE` (the
+first entry of an empty array) is then `undefined`, and every unlanguaged call to
+`buildNotice` - every render of `GET /consent/new`, every `POST /consent` with no explicit
+`?lang=` - throws `AppError("Unsupported notice language: undefined", 400)`. The
+deployment boots clean, health checks pass, and the first data principal who tries to
+consent gets a 400: the same "silent at boot, loud in front of a data principal, fixed by
+one env var" failure class `assertConfigured` exists to close, on the very function that
+was just hardened against it. Reachability is low in practice - an *unset*
+`NOTICE_LANGUAGES` falls back to `"en"` via `|| "en"` before the split ever runs, so this
+needs a stray comma or blank value specifically set - but fixed regardless, per the review.
+
+**Changed.** `src/config/catalog.js` - `assertConfigured` now asserts the resolved list
+**equals** `["en"]` (`SUPPORTED_NOTICE_LANGUAGES.length === 1 &&
+SUPPORTED_NOTICE_LANGUAGES[0] === "en"`) rather than filtering for non-`"en"` entries. An
+empty list, a blank list, `"EN"` (wrong case), `"en,hi"`, and bare `"hi"` are all refused;
+only exactly `["en"]` boots. The error message names the actual resolved list via
+`JSON.stringify(SUPPORTED_NOTICE_LANGUAGES)` rather than only the filtered-out entries, so
+it still names the offending language(s) for the mixed-list and wrong-language cases the
+original message covered, and now also explains the empty-list failure mode.
+
+**Guarded by.** `test/catalog.test.js` - two cases added to the existing "assertConfigured
+refuses to boot with a notice language that has no catalog" test (subprocess-based, since
+`NOTICE_LANGUAGES` is read once at module load - the same technique the rest of that test
+already uses): `bootWith({ NOTICE_LANGUAGES: "," })` and `bootWith({ NOTICE_LANGUAGES: " " })`
+must both print `REFUSED`. The existing cases in the same test (`"en,hi"` refused and
+naming `hi`, bare `"hi"` refused, `"en"` still boots) are unchanged and still pass,
+confirming the rewritten check preserves fix 7's original behaviour rather than merely
+patching the new case.
+
+**RED evidence.** Before the fix, both new assertions failed:
+
+```
+AssertionError [ERR_ASSERTION]: an empty list must not boot
+  actual: 'BOOTED\n'
+  expected: /REFUSED/
+```
+
+After the fix: `node --test test/catalog.test.js` 13/13 pass. `node --test
+test/notice.test.js` (the file most likely to regress on a `SUPPORTED_NOTICE_LANGUAGES`
+consumer change) 13/13 pass, unchanged.
+
+### C. Documented, not fixed: resubmission orphans the phone-only principal's old ledger
+
+**Not a defect introduced by the fix wave** - a residual of fix 3's deliberate ruling
+above (a phone-only data principal who resubmits gets a second `Principal` record, because
+a duplicate is recoverable and a permanently unregistrable beneficiary is not) that the
+README stated incompletely. It said the host can recover the duplicate; it did not say
+what "recover" leaves behind.
+
+**Changed.** `README.md`, in the paragraph the phone-only residual is already described in
+("A phone number is not an identity", immediately after "The residual cost is honest and
+deliberate..."). Added, without softening: her original `ConsentRecord` is orphaned -
+`findPrincipalByContact`'s phone branch (`src/utils/principalId.js`) 409s on exactly the
+ambiguity her own resubmission created, so nothing in this library can reach that old
+record by phone lookup again. Purposes granted on it stay `granted` indefinitely with no
+withdrawal path through this library, because `withdrawConsent` only ever writes to the
+session's `principalId` - withdrawing on the new record never touches the old one. That is
+a gap against Rule 3(c)(i) (withdrawal must be as easy as giving consent) for whichever of
+her two records she cannot reach. States plainly that recovering the duplicate means
+merging or migrating the older ledger onto the one she now uses, and that this library has
+no route or function that does that for you.
+
+**No test added** - documentation-only, describing an existing, already-tested behaviour
+(`findPrincipalByContact`'s phone-ambiguity 409 is already covered by
+`test/principal.test.js`'s "a phone number that identifies more than one principal is
+refused for sign-in, not guessed"). Nothing in the runtime changed.
+
+### Suite counts
+
+| Stage | Tests | Pass | Fail |
+|---|---|---|---|
+| Baseline (before this round) | 158 | 158 | 0 |
+| After fix A (`requireAuth` negotiation) | 159 | 159 | 0 |
+| After fix B (notice-language gate) | 159 | 159 | 0 |
+| After fix C (README only, no test) | 159 | 159 | 0 |
+| Final, run 1 / 2 | 159 / 159 | 159 / 159 | 0 / 0 |
+
+1 test added (fix A). Fix B extended an existing test with two more assertions rather than
+adding a new `test(...)` block, so it does not move the count. No test was deleted,
+weakened, or skipped.

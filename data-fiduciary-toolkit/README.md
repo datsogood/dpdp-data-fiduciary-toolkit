@@ -161,6 +161,20 @@ to disambiguate them - it holds the real-world knowledge that can. That is
 recoverable; a permanently unregistrable beneficiary is not, and an account
 takeover is worse than either.
 
+**"Recoverable" does not mean the old record is still reachable, and it is
+not something you fix by deleting the newer row.** Her original
+`ConsentRecord` is now orphaned: `findPrincipalByContact`'s phone branch 409s
+on exactly the ambiguity her own resubmission created, so nothing in this
+library can look it up by phone again. The purposes she granted on that old
+ledger stay `granted` forever, with no withdrawal path through this
+library - `withdrawConsent` only ever writes to the *session's* principal, so
+withdrawing on the new record never touches the old one. That is a gap
+against Rule 3(c)(i), which requires withdrawal to be as easy as giving
+consent: it is not, for whichever of her two records she cannot reach.
+Recovering the duplicate means merging or migrating the older ledger onto the
+one she now uses - your own back end has to do this deliberately; this
+library has no route or function that does it for you.
+
 `POST /consent` is the one deliberate exception: it is how a `principalId`
 comes to exist at all, so it does not require a session. It does, however,
 refuse (`409`) to touch an existing principal's record.
