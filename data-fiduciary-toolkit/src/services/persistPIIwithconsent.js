@@ -124,6 +124,28 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
   // event this call appends carries it.
   const receiptId = generateDocRef("RC");
 
+  // Upsert the notice body once per distinct version, before any event below
+  // can reference it - so a stored noticeVersion can never point at a row
+  // that does not exist yet. $setOnInsert means the same notice shown again
+  // writes nothing new here: one row per distinct notice, not one per
+  // submission.
+  if (notice) {
+    // The unique index on `version` is what makes this upsert an actual
+    // dedup rather than a race between two concurrent submissions under the
+    // same notice - and mongoose builds indexes in the background, so wait
+    // for it first, same reasoning as ConsentRecord.init() below. Memoized,
+    // so this costs nothing once the index exists. Content-addressing means
+    // a lost race here could at worst duplicate a row with byte-identical
+    // content, never corrupt or fork evidence the way an unindexed
+    // ConsentRecord race would - but there is no reason to accept even that.
+    await models.NoticeVersion.init();
+    await models.NoticeVersion.updateOne(
+      { version: notice.version },
+      { $setOnInsert: { version: notice.version, language: notice.language, body: notice, firstSeenAt: now } },
+      { upsert: true }
+    );
+  }
+
   /**
    * The delta for a given state. Taking state as an argument rather than
    * closing over one is what lets the duplicate-key recovery below recompute
@@ -150,18 +172,21 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
         lawfulBasisKind: entry.lawfulBasis.kind,
         receiptId,
         timestamp: now,
+        // The notice IN FORCE WHEN THIS EVENT WAS WRITTEN, not the record's
+        // most recent one - so an old event stays evidenced even after a
+        // later submission's notice overwrites lastNotice below.
+        noticeVersion: notice ? notice.version : undefined,
       });
     }
     return { events, refused };
   };
 
-  // The full notice body is kept, not just its version, so a dispute can show
-  // exactly what the principal was told rather than a hash they must take on
-  // trust. Kept in one place so both the first attempt and the recovery below
-  // apply the same snapshot.
+  // A lightweight pointer only - the evidence itself is the NoticeVersion row
+  // upserted above, plus each event's own noticeVersion. Kept in one place so
+  // both the first attempt and the recovery below apply the same pointer.
   const snapshotNotice = (doc) => {
     if (notice) {
-      doc.lastNotice = { version: notice.version, language: notice.language, body: notice, shownAt: now };
+      doc.lastNotice = { version: notice.version, language: notice.language, shownAt: now };
     }
   };
 

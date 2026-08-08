@@ -15,6 +15,10 @@ const createRouter = require("../src/http/router");
 
 const PII = { name: "Asha", email: "asha@example.com", phone: "9876543210", dob: "1990-04-01" };
 
+// Guarantees two submissions land in different milliseconds, matching
+// test/consent.test.js's helper of the same name.
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
 /** Boots an app and returns a fetch helper, matching test/auth.test.js. */
 async function app(conn, opts = {}) {
   const a = express();
@@ -98,6 +102,92 @@ test("the notice shown at consent time is stored with the record", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// NoticeVersion - per-event evidence, not just the record's most recent
+// notice. lastNotice is only a pointer to what a principal would see right
+// now; the evidence for a SPECIFIC past event is that event's own
+// noticeVersion plus the row it names here.
+// ---------------------------------------------------------------------------
+
+test("events carry the notice version in force when they were written, not the record's most recent one", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const firstNotice = buildNotice({ language: "en" });
+    const first = await persistPIIwithconsent({
+      models, pii: PII, consentTypes: ["marketing"], notice: firstNotice,
+    });
+
+    getCatalog().push({
+      type: "temp_purpose_for_notice_version_test",
+      title: "Temporary purpose",
+      purpose: "Exists only to change the catalog between two submissions.",
+      lawfulBasis: { kind: "consent", clause: "Section 6", description: "Your consent" },
+      withdrawable: true,
+      prohibitedForChildren: false,
+      retentionMonths: 12,
+    });
+    let secondNotice;
+    try {
+      secondNotice = buildNotice({ language: "en" });
+      assert.notEqual(secondNotice.version, firstNotice.version,
+        "the catalog mutation must actually change the version, or this test proves nothing");
+
+      await persistPIIwithconsent({
+        models, pii: PII, consentTypes: ["marketing", "analytics"],
+        principalId: first.principalId, notice: secondNotice,
+      });
+    } finally {
+      getCatalog().pop();
+    }
+
+    const record = await models.ConsentRecord.findOne({ principalId: first.principalId });
+    const marketingGrant = record.events.find((e) => e.type === "marketing" && e.status === "granted");
+    const analyticsGrant = record.events.find((e) => e.type === "analytics" && e.status === "granted");
+    assert.equal(marketingGrant.noticeVersion, firstNotice.version,
+      "the marketing grant happened under the FIRST notice - a later notice must not silently reattribute it");
+    assert.equal(analyticsGrant.noticeVersion, secondNotice.version);
+
+    // Both versions must still be resolvable, not just the most recent -
+    // that is the whole point of storing a version per event.
+    assert.ok(await models.NoticeVersion.findOne({ version: firstNotice.version }),
+      "the first notice's body must still be resolvable after a later notice supersedes it");
+    assert.ok(await models.NoticeVersion.findOne({ version: secondNotice.version }));
+    assert.equal(record.lastNotice.version, secondNotice.version, "the pointer follows the most recent submission");
+  });
+});
+
+test("showing an unchanged notice twice creates exactly one NoticeVersion row", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const notice = buildNotice({ language: "en" });
+    const first = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"], notice });
+    // Same principal, same notice, submitted again - an ordinary re-post.
+    await persistPIIwithconsent({
+      models, pii: PII, consentTypes: ["marketing"], principalId: first.principalId, notice,
+    });
+    assert.equal(await models.NoticeVersion.countDocuments({ version: notice.version }), 1,
+      "an unchanged notice shown again must not duplicate the row - only the first sighting is stored");
+  });
+});
+
+test("several principals consenting under one unchanged catalog still leave exactly one NoticeVersion", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const notice = buildNotice({ language: "en" });
+    await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"], notice });
+    await persistPIIwithconsent({
+      models, pii: { name: "Bhim", email: "bhim@example.com", phone: "9000000000", dob: "1985-02-02" },
+      consentTypes: ["marketing"], notice,
+    });
+    await persistPIIwithconsent({
+      models, pii: { name: "Chandra", email: "chandra@example.com", phone: "9111111111", dob: "1988-03-03" },
+      consentTypes: ["marketing"], notice,
+    });
+    assert.equal(await models.NoticeVersion.countDocuments({}), 1,
+      "the same notice shown to three principals is one distinct notice, not three");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // H3 is only closed if the HTTP path snapshots a notice too - the only test
 // exercising persistPIIwithconsent's notice parameter above calls the service
 // directly, which every real deployment's consent capture does not.
@@ -133,12 +223,24 @@ test("PUT /consent refreshes the notice snapshot on an authenticated update", as
       await close();
     }
 
+    // The POST above already sets lastNotice, and an unchanged catalog
+    // reproduces the same version - so asserting only that a version is
+    // present would pass even with PUT's notice wiring deleted entirely.
+    // shownAt only moves if PUT snapshots its own notice, so pin that
+    // instead. tick() guarantees the two calls land in different
+    // milliseconds, matching the pattern in test/consent.test.js.
+    const beforePut = (await models.ConsentRecord.findOne({ principalId })).lastNotice.shownAt;
+    await tick();
+
     const { call: asAsha, close: closeAsha } = await app(conn, { resolvePrincipal: () => principalId });
     try {
       const res = await asAsha("PUT", "/consent", { consentTypes: ["marketing", "analytics"] });
       assert.equal(res.status, 200);
       const record = await models.ConsentRecord.findOne({ principalId });
       assert.ok(record.lastNotice.version, "the update path must snapshot a notice too");
+      assert.ok(record.lastNotice.shownAt > beforePut,
+        "shownAt must move on PUT too, or this test cannot distinguish PUT snapshotting its own notice " +
+        "from PUT simply inheriting the POST's unchanged snapshot");
     } finally {
       await closeAsha();
     }
@@ -175,6 +277,21 @@ test("exerciseRight carries the DPO contact", async () => {
     const result = await exerciseRight({ models, principalId, right: "access" });
     assert.equal(result.contact.dpoEmail, "dpo@test.example");
     assert.ok(result.contact.dpoName);
+  });
+});
+
+test("exerciseRight refuses 'withdrawal' - it is immediate and self-service, not a request to file", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    await assert.rejects(
+      () => exerciseRight({ models, principalId, right: "withdrawal" }),
+      (err) => err.status === 400 && /withdrawConsent|consent\/withdraw/.test(err.message),
+      "filing a RightsRequest for 'withdrawal' would return a refId and 'received' status while " +
+        "leaving every purpose exactly as granted as it was - indistinguishable from an erasure request " +
+        "that genuinely needs manual handling"
+    );
+    assert.equal(await models.RightsRequest.countDocuments({}), 0, "the rejection must write nothing");
   });
 });
 

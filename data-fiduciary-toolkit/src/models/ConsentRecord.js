@@ -4,6 +4,13 @@ const { Schema } = require("mongoose");
 // this is the audit trail DPDP expects a fiduciary to be able to produce.
 // This document holds NO PII: PII lives on Principal so it can be erased
 // without destroying the consent evidence.
+//
+// noticeVersion names the Section 5 notice that was in force when THIS event
+// was written - not just the most recent one. The body it points to lives in
+// NoticeVersion, content-addressed by this same string, so an old event's
+// notice stays resolvable even after the catalog moves on and later events
+// point at a different version. Not required: an event written by a direct
+// service caller that passed no notice legitimately has none.
 const consentEventSchema = new Schema(
   {
     type: { type: String, required: true },
@@ -12,21 +19,20 @@ const consentEventSchema = new Schema(
     lawfulBasisKind: { type: String, enum: ["consent", "legitimate_use"], required: true },
     receiptId: { type: String, required: true },
     timestamp: { type: Date, required: true, default: Date.now },
+    noticeVersion: { type: String },
   },
   { _id: false }
 );
 
-// The Section 5 notice shown at the moment of the most recent submission -
-// the evidence of what the principal was told, not just that they consented.
-// One snapshot per record, overwritten on each submission. This is the
-// spec's choice, made for size - see the Task 8 report for the case that the
-// evidentiary argument runs the other way, since it means an older event's
-// notice is unrecoverable once a later submission overwrites this field.
+// A lightweight pointer to the notice shown at the most recent submission -
+// NOT the evidence itself. The evidence is the (version, body) pair in
+// NoticeVersion, and the authoritative record of which version applied to a
+// GIVEN event is that event's own noticeVersion above. This field exists only
+// for a fast "what does this principal see right now" read.
 const noticeSnapshotSchema = new Schema(
   {
     version: { type: String, required: true },
     language: { type: String, required: true },
-    body: { type: Schema.Types.Mixed },
     shownAt: { type: Date, default: Date.now },
   },
   { _id: false }

@@ -45,12 +45,26 @@ function buildNotice({ language = DEFAULT_NOTICE_LANGUAGE } = {}) {
     retentionMonths: c.retentionMonths,
   }));
 
+  // How to complain, stated once. grievance.route and boardComplaint.description
+  // both need this sentence - grievance for the general "how to complain"
+  // interface field, boardComplaint to name Section 5(1)(iii) specifically -
+  // and hand-typing it twice would let an SLA or process change leave the two
+  // silently out of step with each other.
+  const grievanceRoute =
+    "Raise it with our Grievance Officer first. If it is not resolved within the stated period, " +
+    "you may complain to the Data Protection Board of India.";
+
   const body = {
     language,
     fiduciary: { name: FIDUCIARY.name },
     purposes,
     // Rule 3(b)(i) - an itemised description of the personal data, not just
-    // the purposes it is used for.
+    // the purposes it is used for. Unlike purposes and rights above, this is
+    // hand-maintained, not generated from a catalog - there is no single
+    // source of truth for "every PII field this library's schemas accept" to
+    // generate it from. A new field added to pii elsewhere (Principal's
+    // schema, a form, an adopter's own extension) without a matching entry
+    // here would silently under-disclose it. Keep this list in step by hand.
     personalData: [
       { field: "name", description: "Your full name" },
       { field: "email", description: "Your email address" },
@@ -66,13 +80,12 @@ function buildNotice({ language = DEFAULT_NOTICE_LANGUAGE } = {}) {
       path: "/consent/withdraw",
     },
     grievance: {
-      route: "Raise it with our Grievance Officer first. If it is not resolved within the stated period, you may complain to the Data Protection Board.",
+      route: grievanceRoute,
       slaDays: FIDUCIARY.grievanceSlaDays,
     },
     // Section 5(1)(iii) - the manner of complaining to the Board.
     boardComplaint: {
-      description:
-        "Raise it with our Grievance Officer first. If it is not resolved within the stated period, you may complain to the Data Protection Board of India directly.",
+      description: grievanceRoute,
       grievancePath: "/grievance/new",
     },
     dpo: { name: FIDUCIARY.dpoName, email: FIDUCIARY.dpoEmail },
