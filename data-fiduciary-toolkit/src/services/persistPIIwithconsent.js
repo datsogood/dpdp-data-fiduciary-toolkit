@@ -50,7 +50,10 @@ function isVerifiedParentalConsent(parentalConsent) {
  * @param {string[]} [input.consentTypes]   - omit entirely for a PII-only update
  * @param {boolean}  [input.regrant]        - allow reversing a prior withdrawal
  * @param {object}   [input.notice]         - Section 5 notice snapshot (Task 8)
- * @param {object}   [input.parentalConsent] - { name, email, relationship, verifiedAt } - server-side only, see above
+ * @param {object}   [input.parentalConsent] - { name, email, relationship, verifiedAt } - server-side only, see above.
+ *   Optional on the principalId branch: the record written at registration is
+ *   used when the caller passes none, so a registered minor is not locked out
+ *   of every later consent update by a gate no route can satisfy.
  * @param {string}   [input.principalId]  - when the caller ALREADY knows who this
  *   is (an authenticated update), pass it and skip contact-hash resolution
  *   entirely. Without it this function re-derives identity from pii via
@@ -95,25 +98,47 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     );
   }
   const isMinor = age < ADULT_AGE;
-  if (isMinor && !isVerifiedParentalConsent(parentalConsent)) {
-    throw new AppError("Verifiable parental consent is required before processing a child's personal data", 422);
-  }
 
   // An authenticated caller already knows the principal. Resolve by id and
   // never by contact hash - see the principalId param note above.
+  //
+  // On THAT branch the resolution has to happen BEFORE the age gate below,
+  // because the stored record is where a registered minor's parental consent
+  // lives. No route forwards parentalConsent (and none may - it must never be
+  // exposed to a form), and the service used not to fall back to what it had
+  // itself written at registration, so the gate rejected every consent update
+  // by a registered minor with 422 - forever - telling them parental consent
+  // was required when it was on file two collections away. Principal.
+  // parentalConsent and Principal.isMinor were written here and read by
+  // nothing.
+  //
+  // The SIGNUP branch keeps the opposite ordering deliberately: the gate runs
+  // before findOrCreatePrincipal, so a rejected minor still leaves no
+  // Principal and no ConsentRecord behind. Reading a document is not a write,
+  // so resolving first on the authenticated branch does not weaken that.
   let principal;
   let created = false;
+  let effectiveParentalConsent = parentalConsent;
   if (principalId) {
     assertPrincipalId(principalId);
     principal = await models.Principal.findOne({ principalId });
     if (!principal) throw new AppError("No principal found for that id", 404);
-  } else {
+    if (!effectiveParentalConsent) effectiveParentalConsent = principal.parentalConsent;
+  }
+
+  if (isMinor && !isVerifiedParentalConsent(effectiveParentalConsent)) {
+    throw new AppError("Verifiable parental consent is required before processing a child's personal data", 422);
+  }
+
+  if (!principal) {
     ({ principal, created } = await findOrCreatePrincipal({ models, pii }));
     principalId = principal.principalId;
   }
 
   // Persist the determination and the parental consent record (if any) on
-  // the principal's identity document, not on the append-only ledger.
+  // the principal's identity document, not on the append-only ledger. Only a
+  // CALLER-supplied record is written back - assigning the stored one onto
+  // itself would be a no-op that reads like the caller had re-verified.
   principal.isMinor = isMinor;
   if (parentalConsent) principal.parentalConsent = parentalConsent;
   await principal.save();

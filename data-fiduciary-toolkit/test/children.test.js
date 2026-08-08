@@ -133,6 +133,72 @@ test("tracking and advertising are refused for a minor even with parental consen
   });
 });
 
+test("a registered minor can still update consent - the parental consent on file counts", async () => {
+  // The age gate rejects with 422 when isMinor and no verifiable parental
+  // consent is supplied. PUT /consent never forwards parentalConsent - and
+  // must not, it can never come from a form - and the service used not to
+  // fall back to the record it had itself written at registration. So a
+  // 14-year-old registered WITH valid parental consent was locked out of
+  // every later consent update, permanently, told parental consent was
+  // required when it was on file two collections away.
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const parentalConsent = { name: "Parent", email: "p@example.com", relationship: "mother", verifiedAt: new Date() };
+    const pii = { name: "Child", email: "child@example.com", phone: "1", dob: minorDob() };
+
+    const registered = await persistPIIwithconsent({
+      models, pii, consentTypes: ["identity_verification"], parentalConsent,
+    });
+
+    // Exactly what PUT /consent does: identity from the session, the STORED
+    // pii, and no parentalConsent - because no route can supply one.
+    const updated = await persistPIIwithconsent({
+      models,
+      principalId: registered.principalId,
+      pii,
+      consentTypes: ["identity_verification", "underwriting"],
+    });
+
+    assert.equal(updated.principalId, registered.principalId, "the update must land on the same principal");
+    assert.equal(updated.created, false);
+    assert.equal(updated.state.underwriting.status, "granted", "a registered minor must be able to change consent");
+
+    // Section 9 still binds on the update path - parental consent unlocks
+    // nothing the catalog marks prohibitedForChildren.
+    assert.ok(updated.refusedForChild.includes("marketing"));
+    assert.ok(updated.refusedForChild.includes("analytics"));
+    assert.equal(updated.state.marketing, undefined, "behavioural advertising to a child must stay refused");
+    assert.equal(updated.state.analytics, undefined);
+    assert.equal((await models.Principal.findOne({ principalId: registered.principalId })).isMinor, true);
+  });
+});
+
+test("a minor with NO parental consent on file is still refused on the update path", async () => {
+  // The fallback must read what registration actually wrote, not merely make
+  // the gate passable. A principal who is a minor and has no verified record
+  // stored must still be refused - otherwise the fix would open the update
+  // route as a way around Section 9 entirely.
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    // Registered as an adult, so no parental consent was ever recorded.
+    const adult = await persistPIIwithconsent({
+      models, pii: { name: "A", email: "a@example.com", phone: "1", dob: ADULT_DOB }, consentTypes: [],
+    });
+
+    await assert.rejects(
+      () => persistPIIwithconsent({
+        models,
+        principalId: adult.principalId,
+        // A corrected date of birth that makes them a minor.
+        pii: { name: "A", email: "a@example.com", phone: "1", dob: minorDob() },
+        consentTypes: ["underwriting"],
+      }),
+      (e) => e.status === 422 && /parental consent/i.test(e.message),
+      "an empty stored parentalConsent must not satisfy the gate"
+    );
+  });
+});
+
 test("an adult is unaffected", async () => {
   await withDb(async (conn) => {
     const models = buildModels(conn);
