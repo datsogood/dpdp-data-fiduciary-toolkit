@@ -524,3 +524,16 @@ Task 13: fix round re-review ADJUDICATED BY CONTROLLER. One new renderer, its wi
   no-store is set on both receipt paths with the reasoning recorded inline. Suite green at
   142/142. Recorded rather than silently skipped.
 Task 13: complete (commits b26be9e..f5421b2, review approved + 1 fix round)
+
+CONTROLLER ERROR, second occurrence of the same class: I launched the whole-branch review
+  workflow - whose lenses run `npm test`, one of them three times - while the Task 14 implementer
+  was still finishing. 32 concurrent node --test processes. The implementer paused rather than
+  adding more, which was correct, and said so explicitly. Its work is complete and correct on
+  disk (updatePrincipalContact exported with the reasoning inline, plus a README "Correcting
+  contact details" section) but uncommitted and unverified.
+  I had already written the rule after the first occurrence - "never run the suite concurrently"
+  - and then broke it by not counting the workflow's own test runs as suite runs. The rule needs
+  to be: nothing that runs the suite may overlap with anything else that runs the suite,
+  including review agents, not just implementers.
+  Resolution: let the review finish, then resume the implementer to verify and commit. Adding
+  load now would corrupt the last gate's own test results.
