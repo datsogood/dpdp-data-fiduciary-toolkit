@@ -190,6 +190,28 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   router.use(express.urlencoded({ extended: false, limit: "100kb" }));
 
   /**
+   * requireAuth's own 401, negotiated like the error mapper's three branches
+   * below. GET /consent/new is the one deliberately unauthenticated page, and
+   * it links to /consent/withdraw - which sits behind requireAuth - so a
+   * signed-out visitor who clicks that link reaches this function with
+   * Accept: text/html. JSON-only here left them with a raw
+   * `{"error":"authentication required"}` body and nothing to act on: the
+   * same shape of defect as a rendered page dead-ending in a machine-readable
+   * error. Links back to the one page reachable with no session at all, so
+   * they are not stranded.
+   */
+  function sendAuthRequired(req, res) {
+    if (wantsHtml(req)) {
+      const signInUrl = escapeHtml(`${req.baseUrl}/consent/new`);
+      return res
+        .status(401)
+        .type("html")
+        .send(`<p>You need to sign in to reach this page. <a href="${signInUrl}">Return to notice and consent</a>.</p>`);
+    }
+    res.status(401).json({ error: "authentication required" });
+  }
+
+  /**
    * Identity comes only from the host application. principalId is never read
    * from the request body: it is a database key, not a credential, and an
    * earlier version let anyone who knew a data principal's email act as them.
@@ -203,16 +225,16 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
    */
   async function requireAuth(req, res, next) {
     if (typeof resolvePrincipal !== "function") {
-      return res.status(401).json({ error: "authentication required" });
+      return sendAuthRequired(req, res);
     }
     let id;
     try {
       id = await resolvePrincipal(req);
     } catch {
-      return res.status(401).json({ error: "authentication required" });
+      return sendAuthRequired(req, res);
     }
     if (typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id)) {
-      return res.status(401).json({ error: "authentication required" });
+      return sendAuthRequired(req, res);
     }
     req.principalId = id;
     next();

@@ -387,3 +387,39 @@ test("every affordance on the rights page either submits successfully or links t
     }
   });
 });
+
+test("every link the consent page renders is readable when followed signed out, not a raw JSON dead end", async () => {
+  // GET /consent/new is the one deliberately unauthenticated page - it is how
+  // a principalId comes to exist at all - so its own /consent/withdraw link
+  // sits behind requireAuth. A signed-out visitor legitimately gets refused
+  // there; this is NOT "assert 200" for that reason. But requireAuth's 401
+  // was JSON-only on all four of its paths, so clicking that link handed an
+  // anonymous visitor a raw `{"error":"authentication required"}` body with
+  // no way to act on it - the same shape of defect as the rights-page dead
+  // end above, reintroduced on the adjacent page by the fix for a different
+  // finding. The consent-page test above only asserts the href string is
+  // present; it never follows it, so it could not catch this.
+  await withDb(async (conn) => {
+    const app = express();
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => null }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      const html = await (await fetch(`http://localhost:${port}/dpdp/consent/new`, { headers: HTML })).text();
+      const links = [...html.matchAll(/<a href="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, "&"));
+      assert.ok(links.length > 0, "no links found - the parse is wrong and this test proves nothing");
+
+      for (const href of links) {
+        const res = await fetch(`http://localhost:${port}${href}`, { headers: HTML });
+        assert.doesNotMatch(
+          res.headers.get("content-type") || "",
+          /json/,
+          `${href}: a signed-out visitor following this link must get a readable page, not raw JSON ` +
+            `(status ${res.status})`
+        );
+      }
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});

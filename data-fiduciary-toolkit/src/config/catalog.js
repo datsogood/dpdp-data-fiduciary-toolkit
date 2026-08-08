@@ -94,15 +94,25 @@ function assertConfigured() {
   // circular and leave notice.js destructuring a half-built exports object.
   // By the time createRouter calls this, both modules are fully loaded.
   const { SUPPORTED_NOTICE_LANGUAGES } = require("./notice");
-  const untranslated = SUPPORTED_NOTICE_LANGUAGES.filter((lang) => lang !== "en");
-  if (untranslated.length) {
+  // Asserts the resolved list EQUALS ["en"], not merely "has nothing that
+  // isn't en" - a stray comma or blank value (NOTICE_LANGUAGES="," or " ")
+  // resolves to [], which has nothing not-"en" to filter out and so passed
+  // the old `.filter((lang) => lang !== "en").length` check. That left
+  // DEFAULT_NOTICE_LANGUAGE undefined: the deployment booted clean, health
+  // checks passed, and buildNotice then threw "Unsupported notice language:
+  // undefined" on the first GET /consent/new or POST /consent - boot-clean,
+  // loud in front of a data principal, the same failure class as the
+  // PRINCIPAL_ID_SECRET gap this function exists to close.
+  const isOnlyEnglish = SUPPORTED_NOTICE_LANGUAGES.length === 1 && SUPPORTED_NOTICE_LANGUAGES[0] === "en";
+  if (!isOnlyEnglish) {
     throw new Error(
-      `NOTICE_LANGUAGES names ${untranslated.join(", ")}, but only "en" has a notice catalog in this toolkit. ` +
-        "buildNotice validates the language and stamps it onto the body, while every string still comes from " +
-        "the single English catalog - so a request for another language returns an ENGLISH notice labelled as " +
-        "that language, stored under its own content hash and referenced by every consent event written under " +
-        "it. That manufactures affirmative false evidence of Section 5(3) compliance on an append-only ledger. " +
-        "Remove it, or register a translated catalog for it first."
+      `NOTICE_LANGUAGES must resolve to exactly ["en"], got ${JSON.stringify(SUPPORTED_NOTICE_LANGUAGES)} - only ` +
+        '"en" has a notice catalog in this toolkit. buildNotice validates the language and stamps it onto the ' +
+        "body, while every string still comes from the single English catalog - so a request for another " +
+        "language returns an ENGLISH notice labelled as that language, stored under its own content hash and " +
+        "referenced by every consent event written under it. That manufactures affirmative false evidence of " +
+        "Section 5(3) compliance on an append-only ledger. Remove the offending entries, or register a " +
+        "translated catalog for them first."
     );
   }
 }

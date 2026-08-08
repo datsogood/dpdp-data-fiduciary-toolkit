@@ -225,6 +225,16 @@ test("assertConfigured refuses to boot with a notice language that has no catalo
   // Eighth Schedule language must be refused just as firmly as a mixed list.
   assert.match(bootWith({ NOTICE_LANGUAGES: "hi" }), /REFUSED/);
 
+  // A stray comma or blank value resolves SUPPORTED_NOTICE_LANGUAGES to [],
+  // which `filter((lang) => lang !== "en")` never catches - an empty list has
+  // nothing not-"en" to filter out, so it booted clean. DEFAULT_NOTICE_LANGUAGE
+  // is then undefined, and buildNotice throws "Unsupported notice language:
+  // undefined" on the first GET /consent/new or POST /consent - boot-clean,
+  // 400-in-front-of-a-principal, the exact failure class this function exists
+  // to close at boot instead.
+  assert.match(bootWith({ NOTICE_LANGUAGES: "," }), /REFUSED/, "an empty list must not boot");
+  assert.match(bootWith({ NOTICE_LANGUAGES: " " }), /REFUSED/, "a blank list must not boot");
+
   // And the supported configuration must still boot, or this test is only
   // asserting that assertConfigured throws.
   assert.match(bootWith({ NOTICE_LANGUAGES: "en" }), /BOOTED/);
