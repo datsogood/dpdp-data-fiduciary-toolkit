@@ -18,6 +18,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "pretest": "node scripts/warm-binary.js",
     "test": "node --test",
     "example": "node examples/server.js"
   },
