@@ -20,8 +20,7 @@
 require("dotenv").config();
 const crypto = require("node:crypto");
 const express = require("express");
-const { connect, createRouter, buildModels } = require("../src/index");
-const { findPrincipalByContact } = require("../src/utils/principalId");
+const { connect, createRouter, buildModels, findPrincipalByContact } = require("../src/index");
 
 async function main() {
   const db = await connect(process.env.MONGO_URI);

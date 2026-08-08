@@ -123,12 +123,24 @@ is missing, throws, or resolves to anything that is not a 64-character hex
 string, the route answers `401` rather than proceeding - a misconfigured
 deployment fails closed, not open.
 
+Building that session lookup usually starts from a contact detail you have
+just verified (an emailed one-time link, an OTP) - `findPrincipalByContact({
+models, email, phone })` is exported for exactly that: it turns a verified
+email or phone into the `principalId` your session should carry.
+`examples/server.js`'s demo login uses it; a real deployment's own sign-in
+would too.
+
 `POST /consent` is the one deliberate exception: it is how a `principalId`
 comes to exist at all, so it does not require a session. It does, however,
-refuse (`409`) to touch an existing principal's record - correcting your own
-details afterwards is `PUT /consent`, authenticated, and it reads the
-*stored* PII rather than the request body, so no payload can redirect the
-write onto someone else's record.
+refuse (`409`) to touch an existing principal's record.
+
+**`PUT /consent` updates consent decisions only - it cannot change your
+stored name, email, phone, dob, pan, or address.** Any `pii` you submit is
+compared against what is already on file (a mismatch is refused with `403`,
+so no payload can redirect the write onto someone else's record) and then
+discarded: the write always uses the *stored* PII, never the request body.
+There is currently no route through which a data principal can correct their
+own contact details - see "What this is not".
 
 ### Cross-site request forgery
 
@@ -164,7 +176,7 @@ createRouter(...))` it - the rendered forms build their own `action` from
 marked **auth** deny with `401` unless `resolvePrincipal` resolves the
 request to a `principalId`; routes marked **public** do not.
 
-### 1. `persistPIIwithconsent` - signup: `POST /consent` (public); update: `PUT /consent` (auth)
+### 1. `persistPIIwithconsent` - signup: `POST /consent` (public); consent update: `PUT /consent` (auth)
 
 Saves PII plus the consent decisions made, timestamped, and confirms with a
 per-principal receipt (`docRef`, stable for the life of the record) and a
@@ -470,6 +482,19 @@ expect.
   even with genuine parental consent. An adopter serving minors must build that
   verification and call `persistPIIwithconsent` with a `parentalConsent` object
   from trusted server-side code. Do not expose that parameter to a form.
+- **No public API for a data principal to correct their own contact
+  details** - the Section 12 right to correction, for the specific case of
+  name/email/phone/dob/pan/address. The service layer has
+  `updatePrincipalContact` for exactly this (it takes identity from a
+  session, never from the payload, so it cannot be used to redirect a write
+  at someone else's record), but it is not wired to any route and is not
+  exported from the package root. `POST /rights/exercise` with `right:
+  "correction"` still works - it *files a request* your back office resolves
+  by hand - but there is no self-service equivalent to how withdrawal or
+  consent capture work. An integrator needing self-service correction today
+  has to call `updatePrincipalContact` directly
+  (`require("dpdp-fiduciary-toolkit/src/utils/principalId")`) and build a
+  route around it themselves.
 - **Withdrawal does not itself stop or erase anything.** What ships is the
   `onWithdrawal` hook - which tells your own code that a withdrawal happened -
   and `erasePrincipalPII`, an erasure primitive you call yourself. Neither one
@@ -495,14 +520,14 @@ expect.
   add it as a path dependency. The `require("dpdp-fiduciary-toolkit")` in the
   examples above is the name it will publish under.
 
-Four items above - withdrawal/erasure not reaching your processors, erasure
-not reaching free text, no rate limiting, and the install-from-git failure -
-are closed **by this documentation, not by code**: an integrator who needs
-any of them should plan to build it, not assume it exists. The
-`escalateToBoard` note earlier in "The APIs" (it contacts no one) and the
-parental-consent limitation above it (no minor can register over HTTP at
-all) are the same kind of gap, recorded the same way. For the underlying
-finding-by-finding audit this branch worked against, see
+Five items above - no self-service contact correction, withdrawal/erasure not
+reaching your processors, erasure not reaching free text, no rate limiting,
+and the install-from-git failure - are closed **by this documentation, not by
+code**: an integrator who needs any of them should plan to build it, not
+assume it exists. The `escalateToBoard` note earlier in "The APIs" (it
+contacts no one) and the parental-consent limitation above it (no minor can
+register over HTTP at all) are the same kind of gap, recorded the same way.
+For the underlying finding-by-finding audit this branch worked against, see
 [`docs/superpowers/plans/2026-08-07-dpdp-audit-remediation/spec.md`](https://github.com/datsogood/dpdp-data-fiduciary-toolkit/blob/main/docs/superpowers/plans/2026-08-07-dpdp-audit-remediation/spec.md)
 in the repository - it is not reproduced here because a fixed-in-time coverage
 table next to living code drifts the moment either one changes.

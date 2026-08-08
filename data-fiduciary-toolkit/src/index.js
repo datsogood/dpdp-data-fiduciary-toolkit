@@ -3,14 +3,14 @@ const { buildModels } = require("./models");
 const persistPIIwithconsent = require("./services/persistPIIwithconsent");
 const withdrawConsent = require("./services/withdrawConsent");
 const { getConsentState } = require("./services/consentState");
-const { listRights, exerciseRight, listRightsRequests } = require("./services/dataPrincipalRights");
-const { complaintToTheBoard, escalateToBoard, listGrievances } = require("./services/complaintToTheBoard");
+const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = require("./services/dataPrincipalRights");
+const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("./services/complaintToTheBoard");
 const consentManagerRequest = require("./services/consentManagerRequest");
 const { erasePrincipalPII } = require("./services/erasure");
 const { advanceRightsRequest, advanceGrievance, advanceConsentManagerRequest } = require("./services/requestLifecycle");
 const createRouter = require("./http/router");
 const { buildNotice } = require("./config/notice");
-const { newPrincipalId } = require("./utils/principalId");
+const { newPrincipalId, findPrincipalByContact } = require("./utils/principalId");
 const { CONSENT_CATALOG, RIGHTS_CATALOG, FIDUCIARY } = require("./config/catalog");
 
 module.exports = {
@@ -25,9 +25,11 @@ module.exports = {
   listRights,
   exerciseRight,
   listRightsRequests,
+  getRightsRequest,
   complaintToTheBoard,
   escalateToBoard,
   listGrievances,
+  getGrievance,
   consentManagerRequest,
   listConsentManagerRequests: consentManagerRequest.listConsentManagerRequests,
   // Erasure - clears a Principal's PII, leaves the pseudonymous consent
@@ -47,6 +49,12 @@ module.exports = {
   // for a host building its own UI or transport around the services above.
   buildNotice,
   newPrincipalId,
+  // Read-only lookup by contact detail. This is how a host turns "I have
+  // just verified this email/phone belongs to this person" (an emailed
+  // one-time link, an OTP, whatever the host's own auth does) into the
+  // principalId that resolvePrincipal must return - the building block for
+  // real sign-in, not just the demo login in examples/server.js.
+  findPrincipalByContact,
   // Config, exposed for introspection / building your own UI against it.
   CONSENT_CATALOG,
   RIGHTS_CATALOG,
