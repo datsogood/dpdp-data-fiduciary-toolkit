@@ -75,12 +75,14 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
  *   A throw here is logged and does NOT fail the request - the grievance is
  *   already filed, and failing the response would cost the principal their refId
  *   and produce a duplicate filing. Notification is not the filing.
- * @param {string[]} [opts.allowedOrigins] - origins permitted to make a
- *   state-changing request. Default `[]` means "the same host the request
- *   arrived on". Setting it REPLACES that default, so list your own origin too
- *   if you list anything at all. Needed when the browser origin and the
- *   `Host` this router sees differ - a reverse proxy that rewrites `Host`, or
- *   a front end served from a separate origin.
+ * @param {string[]} [opts.allowedOrigins] - ADDITIONAL origins permitted to
+ *   make a state-changing request. The host the request arrived on is always
+ *   allowed; this list is a union with it, never a replacement, so naming a
+ *   partner origin cannot silently stop your own forms working. Needed when
+ *   the browser origin and the `Host` this router sees differ - a reverse
+ *   proxy that rewrites `Host`, or a front end served from a separate origin.
+ *   Entries may be full origins ("https://app.example") or bare hosts
+ *   ("app.example", "localhost:3000").
  */
 function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, allowedOrigins = [] } = {}) {
   if (!db || typeof db.model !== "function") {
@@ -94,11 +96,24 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   // principal who is trying to complain.
   assertConfigured();
   const models = buildModels(db);
-  const router = express.Router();
-  router.use(express.json({ limit: "100kb" }));
-  // extended:true is what let a cross-origin form build principalId[$ne].
-  // extended:false produces only string values, removing that delivery path.
-  router.use(express.urlencoded({ extended: false, limit: "100kb" }));
+
+  /**
+   * The host of an origin, or null if there isn't one.
+   *
+   * Returning null for an EMPTY host matters as much as returning null for an
+   * unparseable one. `new URL("localhost:3000")` does not throw - it reads
+   * "localhost" as a scheme and yields host "" - and so do "file://" and
+   * "about:blank". Letting "" through would mean a scheme-less config entry
+   * silently never matched anything, while any Origin that also parsed to ""
+   * matched it. Both sides collapse "" to null so neither can happen.
+   */
+  function originHost(value) {
+    try {
+      return new URL(value).host || null;
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * Same-origin check on state-changing requests.
@@ -117,6 +132,8 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
    * one closes the drive-by case. The absence of BOTH headers is treated as
    * same-origin because non-browser clients (curl, server-to-server) send
    * neither and are not the threat here; a browser cannot reach that branch.
+   * Absence is tested as `undefined`, not falsiness, so a present-but-empty
+   * `Origin:` is refused rather than read as "no origin at all".
    *
    * A referrer policy can reduce Origin to the literal string "null" rather
    * than remove it. That parses as neither a URL nor a host, so it lands in
@@ -132,30 +149,36 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
    */
   function checkOrigin(req, res, next) {
     if (req.method === "GET" || req.method === "HEAD") return next();
-    const origin = req.get("origin") || req.get("referer");
-    if (!origin) return next();
+    const fromOrigin = req.get("origin");
+    const origin = fromOrigin !== undefined ? fromOrigin : req.get("referer");
+    if (origin === undefined) return next();
 
-    let host;
-    try {
-      host = new URL(origin).host;
-    } catch {
-      return res.status(403).json({ error: "bad origin" });
-    }
-    const allowed = allowedOrigins.length
-      ? allowedOrigins.some((o) => {
-          try {
-            return new URL(o).host === host;
-          } catch {
-            return o === host;
-          }
-        })
-      : host === req.get("host");
+    const host = originHost(origin);
+    if (!host) return res.status(403).json({ error: "bad origin" });
+
+    // UNION, not replace. Configuring one partner origin must not stop your own
+    // forms working - that footgun fails closed in a way an operator would only
+    // discover in production, on the withdrawal route, which is the one route a
+    // data principal most needs to reach.
+    //
+    // `originHost(o) || o` is what lets a scheme-less entry ("portal.example",
+    // "localhost:3000") be written the way an operator naturally writes it: the
+    // parse yields no host, so the raw string is compared against req.get("host"),
+    // which carries no scheme either.
+    const allowed = host === req.get("host") || allowedOrigins.some((o) => (originHost(o) || o) === host);
     if (!allowed) return res.status(403).json({ error: "cross-origin request refused" });
     next();
   }
-  // Before every route, and before requireAuth: a forged request is refused
-  // without consulting the session at all.
+
+  const router = express.Router();
+  // FIRST, ahead of the body parsers and of requireAuth. There is no reason to
+  // parse up to 100kb of a request that is about to be refused, and a forged
+  // request should never reach the session lookup at all.
   router.use(checkOrigin);
+  router.use(express.json({ limit: "100kb" }));
+  // extended:true is what let a cross-origin form build principalId[$ne].
+  // extended:false produces only string values, removing that delivery path.
+  router.use(express.urlencoded({ extended: false, limit: "100kb" }));
 
   /**
    * Identity comes only from the host application. principalId is never read

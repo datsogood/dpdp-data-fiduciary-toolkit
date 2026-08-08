@@ -290,9 +290,9 @@ test("an Origin of null is refused - it is a value, not an absent header", async
   });
 });
 
-test("a configured allowedOrigins entry is honoured", async () => {
+test("a configured allowedOrigins entry is honoured, and does not displace the request's own host", async () => {
   await withDb(async (conn) => {
-    const { call, close } = await boot(conn, { allowedOrigins: ["https://portal.example"] });
+    const { call, close, origin } = await boot(conn, { allowedOrigins: ["https://portal.example"] });
     try {
       const allowed = await call(
         "POST",
@@ -309,6 +309,81 @@ test("a configured allowedOrigins entry is honoured", async () => {
         { Origin: "https://evil.example", Accept: "application/json" }
       );
       assert.equal(refused.status, 403);
+
+      // The assertion that tells union apart from replace, and the only one in
+      // this file that can. Under replace, naming one partner origin silently
+      // stops the fiduciary's OWN forms working - and the route it breaks is
+      // the withdrawal route, which is the one a data principal most needs to
+      // reach. It fails closed, in production, long after the config change.
+      const ownHost = await call(
+        "POST",
+        "/consent/withdraw",
+        { consentTypes: ["analytics"] },
+        { Origin: origin, Accept: "application/json" }
+      );
+      assert.equal(
+        ownHost.status,
+        200,
+        "configuring a partner origin must not stop the router's own host from posting to it"
+      );
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("a scheme-less allowedOrigins entry matches, and an empty parsed host never does", async () => {
+  await withDb(async (conn) => {
+    // new URL("localhost:9999").host is "" and does NOT throw - "localhost:"
+    // reads as a scheme. So a bare host:port entry used to yield "" and match
+    // nothing, while admitting any Origin that also parsed to "" (file://,
+    // about:blank). Both halves are asserted here.
+    const { call, close } = await boot(conn, { allowedOrigins: ["localhost:9999", "portal.example"] });
+    try {
+      const bareHostPort = await call(
+        "POST",
+        "/consent/withdraw",
+        { consentTypes: ["analytics"] },
+        { Origin: "http://localhost:9999", Accept: "application/json" }
+      );
+      assert.equal(bareHostPort.status, 200, "a host:port entry must match the way an operator writes it");
+
+      const bareHost = await call(
+        "POST",
+        "/consent/withdraw",
+        { consentTypes: ["analytics"] },
+        { Origin: "https://portal.example", Accept: "application/json" }
+      );
+      assert.equal(bareHost.status, 200, "a bare host entry must match too");
+
+      // The fail-open half: about:blank parses cleanly to an empty host.
+      const emptyHost = await call(
+        "POST",
+        "/consent/withdraw",
+        { consentTypes: ["analytics"] },
+        { Origin: "about:blank", Accept: "application/json" }
+      );
+      assert.equal(emptyHost.status, 403, "an origin with no host must never be admitted by an empty config host");
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("a present-but-empty Origin is refused, not read as no origin at all", async () => {
+  await withDb(async (conn) => {
+    const { call, close, models, principalId } = await boot(conn);
+    try {
+      // No browser emits this - it is defence in depth against reading the
+      // header's absence as falsiness rather than as undefined.
+      const res = await call(
+        "POST",
+        "/consent/withdraw",
+        { consentTypes: ["marketing"] },
+        { Origin: "", Accept: "application/json" }
+      );
+      assert.equal(res.status, 403);
+      assert.equal((await ledgerEvents(models, principalId)).filter((e) => e.status === "withdrawn").length, 0);
     } finally {
       await close();
     }
@@ -345,6 +420,31 @@ test("createRouter refuses to start with a placeholder DPO contact", async () =>
       process.env.FIDUCIARY_DPO_EMAIL = saved;
       delete require.cache[require.resolve("../src/config/catalog")];
       delete require.cache[require.resolve("../src/http/router")];
+    }
+  });
+});
+
+test("createRouter refuses to start on a DPO contact that is not an address at all", async () => {
+  await withDb(async (conn) => {
+    const saved = process.env.FIDUCIARY_DPO_EMAIL;
+    // Not the placeholder, so the placeholder list never sees them - and just
+    // as useless published on a grievance page as dpo@example.com is.
+    for (const bad of [" ", "tbd", "not-an-email", "dpo@localhost", " dpo@real.example "]) {
+      try {
+        delete require.cache[require.resolve("../src/config/catalog")];
+        delete require.cache[require.resolve("../src/http/router")];
+        process.env.FIDUCIARY_DPO_EMAIL = bad;
+        const freshRouter = require("../src/http/router");
+        assert.throws(
+          () => freshRouter({ db: conn, resolvePrincipal: () => null }),
+          /FIDUCIARY_DPO_EMAIL/,
+          `${JSON.stringify(bad)} must not reach a data principal as a contact address`
+        );
+      } finally {
+        process.env.FIDUCIARY_DPO_EMAIL = saved;
+        delete require.cache[require.resolve("../src/config/catalog")];
+        delete require.cache[require.resolve("../src/http/router")];
+      }
     }
   });
 });

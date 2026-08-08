@@ -16,7 +16,19 @@ const FIDUCIARY = {
 // grievance page renders it to data principals, so the fiduciary looks like it
 // has published Grievance Officer contact details while every complaint sent
 // there goes nowhere.
-const PLACEHOLDER_EMAILS = ["dpo@example.com", ""];
+//
+// No "" entry: FIDUCIARY.dpoEmail already collapses an unset or empty env var
+// to the placeholder via `||`, so listing "" here would read as coverage that
+// nothing can reach. The shape check below is what catches the values that
+// ARE reachable and just as useless - " ", "tbd", "not-an-email".
+const PLACEHOLDER_EMAILS = ["dpo@example.com"];
+
+// Deliberately NOT RFC 5322. That grammar accepts addresses no mail system
+// routes, and wrongly rejecting a real Grievance Officer's address would be a
+// worse failure than letting an odd one through. This catches the shapes that
+// actually get committed to a .env: blank, no domain, no dot in the domain,
+// stray whitespace from a copy-paste.
+const PLAUSIBLE_EMAIL = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
 
 function assertPositiveInteger(value, envName) {
   if (!Number.isInteger(value) || value < 1) {
@@ -42,6 +54,14 @@ function assertConfigured() {
     throw new Error(
       "FIDUCIARY_DPO_EMAIL is unset or still the placeholder (dpo@example.com). " +
         "The Act requires published, valid Grievance Officer contact details - set it before serving traffic."
+    );
+  }
+  // Not a placeholder, but not an address either. A grievance page publishing
+  // "tbd" satisfies the duty exactly as little as one publishing example.com.
+  if (!PLAUSIBLE_EMAIL.test(FIDUCIARY.dpoEmail)) {
+    throw new Error(
+      `FIDUCIARY_DPO_EMAIL does not look like an email address, got: ${JSON.stringify(FIDUCIARY.dpoEmail)}. ` +
+        "It is published to data principals as the Grievance Officer contact, so it has to be reachable."
     );
   }
   assertPositiveInteger(FIDUCIARY.grievanceSlaDays, "GRIEVANCE_SLA_DAYS");

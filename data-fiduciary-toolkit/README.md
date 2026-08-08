@@ -91,11 +91,13 @@ Two things this does not do, and you must:
   session store - by design - so it cannot issue CSRF tokens.
 - **Set `allowedOrigins` if your browser origin is not the `Host` this router
   sees** - a reverse proxy that rewrites `Host`, or a front end served from a
-  separate origin. Supplying it *replaces* the same-host default, so list your
-  own origin too:
+  separate origin. The host the request arrived on is *always* allowed;
+  anything you list is permitted **in addition**, never instead, so naming a
+  partner origin cannot quietly stop your own forms working. Entries may be
+  full origins or bare hosts:
 
   ```js
-  createRouter({ db, resolvePrincipal, allowedOrigins: ["https://app.example", "https://portal.example"] })
+  createRouter({ db, resolvePrincipal, allowedOrigins: ["https://portal.example", "localhost:3000"] })
   ```
 
 ## The five APIs

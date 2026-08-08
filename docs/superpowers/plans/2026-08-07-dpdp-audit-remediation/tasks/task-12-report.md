@@ -360,3 +360,130 @@ refusal before I got here; the README now does too.
    and no reader concludes an email was sent, so I drew the line there. If you
    want the consent-manager surface held to the same standard, it is a one-word
    change.
+
+---
+
+# Fix report - review round 1
+
+**Commit:** see below. **Suite: 134/134 pass, 24.4s** (131 + 3 new tests).
+
+## The blocker: `allowedOrigins` is now a union
+
+`router.js` no longer branches on `allowedOrigins.length`. The host the request
+arrived on is always allowed, and the configured list is permitted in addition:
+
+```js
+const allowed = host === req.get("host") || allowedOrigins.some((o) => (originHost(o) || o) === host);
+```
+
+JSDoc and README both updated - they said "replaces", they now say the list is
+additive and can never displace the request's own host.
+
+### Evidence the new assertion detects the change
+
+You were right that the old `allowedOrigins` test could not tell replace from
+union apart. The third call - same-origin, with `allowedOrigins:
+["https://portal.example"]` still configured - is the discriminator.
+
+**Before the union change** (`node --test test/http.test.js`):
+
+```
+✖ a configured allowedOrigins entry is honoured, and does not displace the request's own host
+  AssertionError: configuring a partner origin must not stop the router's own host from posting to it
+ℹ tests 18   ℹ pass 17   ℹ fail 1
+```
+
+The failure is 403 vs 200, on that assertion alone - every other test in the
+file passed under replace semantics, which is exactly the blind spot you named.
+After the change: 18/18, then 21/21 with the tests below.
+
+## The four hardening items
+
+1. **`checkOrigin` moved above the body parsers.** Order is now
+   `checkOrigin` -> `express.json` -> `express.urlencoded` (`router.js:177-181`).
+   A forged cross-origin request is refused before up to 100kb is parsed, and
+   before `requireAuth` consults the session. `checkOrigin` reads only the
+   method and two headers, so it needs nothing the parsers produce. I moved the
+   whole function above `express.Router()` rather than relying on hoisting, so
+   the registration order reads in source order.
+
+2. **Empty parsed host rejected on both sides.** New `originHost()` helper
+   collapses *both* a throw and an empty host to `null`. This fixes both
+   consequences you identified: `new URL("localhost:3000").host` is `""` without
+   throwing, so a scheme-less entry previously never matched anything, while any
+   Origin that also parsed to `""` (`about:blank`, `file://`) matched it. The
+   request side now 403s on an empty host, and the config side falls back to the
+   raw string - so `"localhost:3000"` and `"portal.example"` now match the way
+   an operator naturally writes them.
+
+3. **Empty `Origin:` header refused.** Absence is tested as `undefined`, not
+   falsiness: `const origin = fromOrigin !== undefined ? fromOrigin : req.get("referer")`.
+   A present-but-empty header now reaches `originHost("")`, which throws, and is
+   refused. Verified the header genuinely reaches the server rather than being
+   stripped by undici - the test observes 403, which is only reachable if
+   `req.get("origin")` returned `""`.
+
+4. **`PLACEHOLDER_EMAILS` dead `""` entry removed**, with a comment saying why
+   it cannot be reached (`dpoEmail` collapses an unset var to the placeholder
+   via `||`). On your prompt, I took the second half too: `" "`, `"tbd"`,
+   `"not-an-email"`, `"dpo@localhost"` and a copy-paste-padded
+   `" dpo@real.example "` all passed. A deliberately non-RFC-5322 shape check
+   now refuses them. The comment says why it is not RFC 5322: that grammar
+   accepts addresses no mail system routes, and wrongly rejecting a real
+   Grievance Officer's address is a worse failure than letting an odd one
+   through.
+
+## Tests added (3), and proof they are not vacuous
+
+- `a scheme-less allowedOrigins entry matches, and an empty parsed host never does`
+- `a present-but-empty Origin is refused, not read as no origin at all`
+- `createRouter refuses to start on a DPO contact that is not an address at all`
+
+Rather than reason about whether these would have failed before, I stashed
+**only** `src/http/router.js` and `src/config/catalog.js` back to HEAD, leaving
+the new tests in place, and ran the file:
+
+```
+--- src reverted to HEAD (pre-fix); tests are the NEW ones ---
+✖ a configured allowedOrigins entry is honoured, and does not displace the request's own host
+✖ a scheme-less allowedOrigins entry matches, and an empty parsed host never does
+✖ a present-but-empty Origin is refused, not read as no origin at all
+✖ createRouter refuses to start on a DPO contact that is not an address at all
+ℹ tests 21   ℹ pass 17   ℹ fail 4
+```
+
+All four fail against the old source and pass against the new one. No vacuous
+passes.
+
+## Full suite
+
+```
+ℹ tests 134   ℹ pass 134   ℹ fail 0
+ℹ duration_ms 23638.38
+npm test  19.36s user 7.51s system 109% cpu 24.432 total
+```
+
+131 -> 134; every pre-existing test still passes.
+
+## Not addressed here, by your direction
+
+The changelog and version note for the breaking changes - `assertConfigured`
+throwing at construction, `createRouter` requiring `db` and `resolvePrincipal`,
+and the HTML branches moving 200 -> 201 - are Task 14's. I did not touch
+`package.json` or the release surface. Note that this round *adds* one more
+breaking change to that list: the DPO email shape check will refuse a
+deployment whose address is set but malformed, which previously booted.
+
+## Remaining concerns
+
+Both are unchanged from the original report and neither is a defect:
+
+1. **Only the host is compared, not the scheme.** An attacker with a plaintext
+   `http://` foothold on the same hostname could forge against the `https://`
+   site. Comparing schemes needs `req.protocol`, which depends on the host's
+   `trust proxy` setting - not something this library owns. `allowedOrigins` is
+   the escape hatch.
+2. **Em dashes remain in files this task never opened** - `README.md` (14),
+   `src/index.js`, `src/models/ConsentManagerRequest.js`,
+   `src/services/consentManagerRequest.js`. A repo-wide sweep belongs to the
+   documentation pass.
