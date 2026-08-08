@@ -472,3 +472,32 @@ Task 11: NEW FINDING from the implementer, correctly not fixed out of scope: sla
   getRightsRequest do not - so a principal cannot see when their rights request is due, which is
   exactly when they would know to chase it. Carried into T12's dispatch.
 Task 11: complete (commits ab8da78..c900f6b, review approved + 1 fix round)
+Task 12: implementer DONE_WITH_CONCERNS, 131/131, then fix round 1 (commits de2ab60..1668c73),
+  134/134. Closes H5, H7, M1, M2, M11, L2 and the CSRF gap Task 5 created.
+Task 12: task review (opus) verified the CSRF control has NO browser-reachable bypass, by
+  checking rather than reasoning: Origin is unconditionally appended on every non-GET/HEAD
+  request; Origin: null throws into the 403 branch rather than reading as absent (the detail the
+  whole control depends on - a sandboxed iframe or redirected cross-origin POST sends the literal
+  string); it enumerated EVERY GET handler to confirm none mutates, so the GET/HEAD exemption
+  confers nothing; 307/308 redirects re-run the append-Origin step; Node's parser cannot be
+  case-tricked on the method. Also verified escapeHtml is complete across all three templates and
+  all three router fragments, so T13 has no gap to fall through.
+Task 12: the implementer found MY fault-injection test was broken - seeding consentTypes: []
+  means marketing is DENIED, so withdrawConsent reports noChange, onWithdrawal never fires and
+  the route returns 200. It would never have exercised the error mapper it was written to test.
+  The reviewer confirmed the diagnosis in the source (withdrawConsent.js:58-60 and the
+  if (withdrawn.length) gate).
+Task 12: 1 Important, and it was SPEC DRIFT I CREATED - allowedOrigins shipped as replace, not
+  union, because I changed the plan after implementation. The implementer had flagged the footgun
+  and recommended union. The reviewer added the sharp part: the existing test passed identically
+  under both semantics, so nothing would have caught the drift.
+Task 12: fix round improved on my instructions twice - it FIXED scheme-less allowedOrigins
+  entries rather than merely refusing them ("localhost:3000" and "portal.example" now match,
+  which they never did), and it moved the checkOrigin function definition rather than leaning on
+  hoisting so registration reads in source order. Non-vacuity proved by stashing ONLY the two
+  source files back to HEAD with the new tests in place: 4 fail, 17 pass.
+Task 12: NEW BREAKING CHANGE for T14's changelog - the DPO shape check now refuses a set but
+  malformed address (" ", "tbd", "not-an-email", "dpo@localhost", a padded address) that
+  previously booted. Deliberately not RFC 5322: wrongly rejecting a real Grievance Officer
+  address is the worse failure. T14's changelog list expanded to seven items.
+Task 12: complete (commits 13624b3..1668c73, review approved + 1 fix round)

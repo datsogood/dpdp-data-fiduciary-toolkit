@@ -167,6 +167,20 @@ grep -o '^[A-Z_]*' .env.example | grep -v '^$' | sort -u
 
 By the end of the branch the set is: `MONGO_URI`, `PRINCIPAL_ID_SECRET`, `FIDUCIARY_NAME`, `FIDUCIARY_DPO_NAME`, `FIDUCIARY_DPO_EMAIL`, `GRIEVANCE_SLA_DAYS`, `RIGHTS_SLA_DAYS`, `NOTICE_LANGUAGES`, `PORT`. Add anything missing.
 
+- [ ] **Step 5b2: Version bump and changelog for the breaking changes**
+
+Two changes in this branch break an existing integrator, and the package version has to say so. `createRouter` now **throws at construction** if `FIDUCIARY_DPO_EMAIL` is unset or still `dpo@example.com`, and it now requires a `db` handle and an injected `resolvePrincipal`. A deployment that worked on 0.1.0 will fail to boot.
+
+That is the right trade - the alternative serves a grievance page publishing `dpo@example.com`, which looks compliant, loses every complaint, and is indistinguishable from working - but it must be announced rather than discovered. Set `"version": "0.2.0"` in `package.json` (already done in Task 1) and add a `## Breaking changes in 0.2.0` section to the README listing:
+
+- `createRouter` now requires a `db` handle and an injected `resolvePrincipal`, and every mutating route denies without the latter.
+- Startup config assertions: an unset or placeholder `FIDUCIARY_DPO_EMAIL` now refuses to boot, and so does a **set but malformed** one - `"tbd"`, `"not-an-email"`, a bare hostname. A deployment with a malformed address booted on 0.1.0 and served it to data principals on the grievance page.
+- A non-positive-integer `GRIEVANCE_SLA_DAYS` or `RIGHTS_SLA_DAYS` refuses to boot rather than becoming `NaN` at runtime.
+- `principalId` is no longer derivable from an email, so 0.1.0 identifiers cannot be carried over.
+- The `lastNotice` shape change from Step 4d.
+- HTML responses on the negotiating routes now return 201 where they previously returned 200.
+- A cross-origin state-changing request is refused with 403 unless its origin is the request's own host or listed in the new `allowedOrigins`.
+
 - [ ] **Step 5c: State M13's real status honestly**
 
 M13 ("install-from-git fails, and `require("dpdp-fiduciary-toolkit")` cannot resolve") is only *documented* by T1, not fixed - npm does not use `repository.directory` for install resolution, it is metadata for source links only. So after this branch, installing from the git URL still fails. Unlike H2 and M14, that was not flagged as a deliberate boundary.

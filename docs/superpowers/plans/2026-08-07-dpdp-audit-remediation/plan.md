@@ -3778,15 +3778,23 @@ function checkOrigin(req, res, next) {
   } catch {
     return res.status(403).json({ error: "bad origin" });
   }
-  const allowed = allowedOrigins.length
-    ? allowedOrigins.some((o) => { try { return new URL(o).host === host; } catch { return o === host; } })
-    : host === req.get("host");
+  // UNION, not replace. Configuring one partner origin must not stop your own
+  // forms working - that footgun fails closed in a way an operator would only
+  // discover in production, on the withdrawal route, which is the one route a
+  // data principal most needs to reach.
+  const sameHost = host === req.get("host");
+  const configured = allowedOrigins.some((o) => {
+    try { return new URL(o).host === host; } catch { return o === host; }
+  });
+  const allowed = sameHost || configured;
   if (!allowed) return res.status(403).json({ error: "cross-origin request refused" });
   next();
 }
 ```
 
-`createRouter` gains an `allowedOrigins` option (default `[]`, meaning "same host as the request"). Register `checkOrigin` before the routes.
+`createRouter` gains an `allowedOrigins` option (default `[]`). The request's own host is **always** allowed; `allowedOrigins` adds to that rather than replacing it.
+
+Note `Origin: null` must not read as absent. A browser under a restrictive referrer policy sends the literal string `"null"` rather than omitting the header, and `new URL("null")` throws - which must land in the 403 branch, not the allow branch. Test it explicitly, asserting the ledger is unchanged.
 
 Tests: a `POST /consent/withdraw` carrying `Origin: https://evil.example` is refused with 403 and **the ledger is unchanged**; the same request with a matching Origin succeeds; a request with no Origin at all still succeeds so API clients are unaffected; and an explicitly configured `allowedOrigins` entry is honoured.
 
@@ -4212,6 +4220,20 @@ grep -o '^[A-Z_]*' .env.example | grep -v '^$' | sort -u
 ```
 
 By the end of the branch the set is: `MONGO_URI`, `PRINCIPAL_ID_SECRET`, `FIDUCIARY_NAME`, `FIDUCIARY_DPO_NAME`, `FIDUCIARY_DPO_EMAIL`, `GRIEVANCE_SLA_DAYS`, `RIGHTS_SLA_DAYS`, `NOTICE_LANGUAGES`, `PORT`. Add anything missing.
+
+- [ ] **Step 5b2: Version bump and changelog for the breaking changes**
+
+Two changes in this branch break an existing integrator, and the package version has to say so. `createRouter` now **throws at construction** if `FIDUCIARY_DPO_EMAIL` is unset or still `dpo@example.com`, and it now requires a `db` handle and an injected `resolvePrincipal`. A deployment that worked on 0.1.0 will fail to boot.
+
+That is the right trade - the alternative serves a grievance page publishing `dpo@example.com`, which looks compliant, loses every complaint, and is indistinguishable from working - but it must be announced rather than discovered. Set `"version": "0.2.0"` in `package.json` (already done in Task 1) and add a `## Breaking changes in 0.2.0` section to the README listing:
+
+- `createRouter` now requires a `db` handle and an injected `resolvePrincipal`, and every mutating route denies without the latter.
+- Startup config assertions: an unset or placeholder `FIDUCIARY_DPO_EMAIL` now refuses to boot, and so does a **set but malformed** one - `"tbd"`, `"not-an-email"`, a bare hostname. A deployment with a malformed address booted on 0.1.0 and served it to data principals on the grievance page.
+- A non-positive-integer `GRIEVANCE_SLA_DAYS` or `RIGHTS_SLA_DAYS` refuses to boot rather than becoming `NaN` at runtime.
+- `principalId` is no longer derivable from an email, so 0.1.0 identifiers cannot be carried over.
+- The `lastNotice` shape change from Step 4d.
+- HTML responses on the negotiating routes now return 201 where they previously returned 200.
+- A cross-origin state-changing request is refused with 403 unless its origin is the request's own host or listed in the new `allowedOrigins`.
 
 - [ ] **Step 5c: State M13's real status honestly**
 
