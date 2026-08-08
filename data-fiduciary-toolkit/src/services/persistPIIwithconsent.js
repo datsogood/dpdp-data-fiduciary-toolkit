@@ -1,6 +1,6 @@
 const { getCatalog, getValidConsentTypes } = require("../config/catalog");
 const { findOrCreatePrincipal, generateDocRef } = require("../utils/principalId");
-const { assertStringArray } = require("../utils/validate");
+const { assertStringArray, assertPrincipalId } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
 const { ageInYears, ADULT_AGE } = require("../utils/age");
 
@@ -51,9 +51,20 @@ function isVerifiedParentalConsent(parentalConsent) {
  * @param {boolean}  [input.regrant]        - allow reversing a prior withdrawal
  * @param {object}   [input.notice]         - Section 5 notice snapshot (Task 8)
  * @param {object}   [input.parentalConsent] - { name, email, relationship, verifiedAt } - server-side only, see above
+ * @param {string}   [input.principalId]  - when the caller ALREADY knows who this
+ *   is (an authenticated update), pass it and skip contact-hash resolution
+ *   entirely. Without it this function re-derives identity from pii via
+ *   findOrCreatePrincipal, which is right for signup and wrong for an update:
+ *   phoneHash is deliberately non-unique, so a household sharing a handset can
+ *   have two candidate documents and the winner is decided by insertion order
+ *   rather than by anything asserted. Worse, if PRINCIPAL_ID_SECRET is ever
+ *   rotated, every stored emailHash goes stale and an authenticated update
+ *   would MINT A NEW PRINCIPAL carrying the old one's PII, return the new id to
+ *   the caller, and append the consent event to a forked ledger, orphaning the
+ *   original record with live PII.
  * @returns {Promise<{ docRef, receiptId, principalId, created, events, state, refusedForChild }>}
  */
-async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, parentalConsent } = {}) {
+async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, parentalConsent, principalId } = {}) {
   // Omitting consentTypes and submitting [] are different acts: the first is
   // "no consent decision was made", the second is "I decline everything".
   //
@@ -71,6 +82,11 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
 
   // The age gate runs before any write - findOrCreatePrincipal included - so
   // a rejected minor leaves no Principal and no ConsentRecord behind.
+  //
+  // It runs on EVERY path, signup and authenticated update alike. Skipping it
+  // for an update would leave isMinor stale and let a purpose the catalog marks
+  // prohibitedForChildren be granted to a child through the update route, which
+  // is the whole restriction Section 9 imposes.
   const age = ageInYears(pii && pii.dob);
   if (age === null) {
     throw new AppError(
@@ -83,8 +99,18 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     throw new AppError("Verifiable parental consent is required before processing a child's personal data", 422);
   }
 
-  const { principal, created } = await findOrCreatePrincipal({ models, pii });
-  const principalId = principal.principalId;
+  // An authenticated caller already knows the principal. Resolve by id and
+  // never by contact hash - see the principalId param note above.
+  let principal;
+  let created = false;
+  if (principalId) {
+    assertPrincipalId(principalId);
+    principal = await models.Principal.findOne({ principalId });
+    if (!principal) throw new AppError("No principal found for that id", 404);
+  } else {
+    ({ principal, created } = await findOrCreatePrincipal({ models, pii }));
+    principalId = principal.principalId;
+  }
 
   // Persist the determination and the parental consent record (if any) on
   // the principal's identity document, not on the append-only ledger.

@@ -74,6 +74,40 @@ test("principalId in the request body is ignored - it never grants access", asyn
   });
 });
 
+test("principalId in the request body is ignored by an AUTHENTICATED handler too", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+    const asha = (await persistPIIwithconsent({ models, pii: PII, consentTypes: [] })).principalId;
+    const bhim = (
+      await persistPIIwithconsent({
+        models,
+        pii: { name: "Bhim", email: "bhim@example.com", phone: "9000000000", dob: "1985-02-02" },
+        consentTypes: [],
+      })
+    ).principalId;
+
+    // Signed in as Bhim. The 401 case above never reaches a handler, so it
+    // cannot show that a handler ignores the body - this one can.
+    const { call, close } = await app(conn, { resolvePrincipal: () => bhim });
+    try {
+      const res = await call("POST", "/grievance", {
+        principalId: asha,
+        subject: "filed in someone else's name",
+        description: "d",
+      });
+      assert.equal(res.status, 201);
+      const { refId } = await res.json();
+      const stored = await models.Grievance.findOne({ refId });
+      assert.equal(stored.principalId, bhim, "the grievance must be attributed to the session, not the body");
+      assert.equal(await models.Grievance.countDocuments({ principalId: asha }), 0,
+        "nothing may be filed against the principal named in the body");
+    } finally {
+      await close();
+    }
+  });
+});
+
 test("POST /consent creates a new principal unauthenticated, but refuses to update an existing one", async () => {
   await withDb(async (conn) => {
     const { call, close } = await app(conn);
@@ -179,14 +213,20 @@ test("PUT /consent updates the session principal, and cannot reach another princ
       await close();
     }
 
+    const ledgerBefore = await models.ConsentRecord.findOne({ principalId: asha }).lean();
+
     // Bhim is signed in. Everything below acts as Bhim.
     const { call: asBhim, close: closeBhim } = await app(conn, { resolvePrincipal: () => bhim });
     try {
+      const before = await models.Principal.countDocuments({});
       const ok = await asBhim("PUT", "/consent", { consentTypes: ["analytics", "underwriting"] });
       assert.equal(ok.status, 200);
       const body = await ok.json();
       assert.equal(body.principalId, bhim, "the update must land on the session principal");
       assert.equal(body.state.underwriting.status, "granted");
+      assert.equal(body.created, false, "an authenticated update never creates a principal");
+      assert.equal(await models.Principal.countDocuments({}), before,
+        "an update must not mint a new principal");
 
       // C1 again, merely requiring an account: pass the victim's email.
       const attack = await asBhim("PUT", "/consent", {
@@ -198,13 +238,96 @@ test("PUT /consent updates the session principal, and cannot reach another princ
       const victim = await models.Principal.findOne({ principalId: asha }).lean();
       assert.equal(victim.pii.name, "Asha", "the victim's PII must be untouched");
       const ledger = await models.ConsentRecord.findOne({ principalId: asha }).lean();
-      assert.equal(
-        ledger.events.filter((e) => e.type === "marketing" && e.status === "withdrawn").length,
-        0,
-        "no event may be appended to the victim's ledger"
-      );
+      assert.equal(ledger.events.length, ledgerBefore.events.length,
+        "no event of any kind may be appended to the victim's ledger");
+      assert.equal(JSON.stringify(ledger.events), JSON.stringify(ledgerBefore.events));
     } finally {
       await closeBhim();
+    }
+  });
+});
+
+test("PUT /consent still lands on the session principal after PRINCIPAL_ID_SECRET is rotated", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const saved = process.env.PRINCIPAL_ID_SECRET;
+    const { call, close } = await app(conn);
+    let principalId;
+    try {
+      principalId = (await (await call("POST", "/consent", { pii: PII, consentTypes: ["marketing"] })).json())
+        .principalId;
+    } finally {
+      await close();
+    }
+
+    // Rotating the secret makes every stored emailHash stale. lookupHash reads
+    // the env per call, so this is exactly what a real rotation looks like.
+    // Resolving identity by contact hash here would match nothing and MINT a
+    // new principal carrying this one's PII, returning a different id and
+    // forking the ledger, leaving the original orphaned with live PII.
+    process.env.PRINCIPAL_ID_SECRET = "a-rotated-secret-also-at-least-32-characters";
+    const { call: after, close: closeAfter } = await app(conn, { resolvePrincipal: () => principalId });
+    try {
+      const res = await after("PUT", "/consent", { consentTypes: ["marketing", "underwriting"] });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.principalId, principalId, "a stale contact hash must not redirect the write");
+      assert.equal(body.created, false);
+      assert.equal(body.state.underwriting.status, "granted");
+      assert.equal(await models.Principal.countDocuments({}), 1, "no second principal may be minted");
+      assert.equal(await models.ConsentRecord.countDocuments({}), 1, "the ledger must not fork");
+    } finally {
+      process.env.PRINCIPAL_ID_SECRET = saved;
+      await closeAfter();
+    }
+  });
+});
+
+test("a household sharing a handset cannot have an update land on the wrong member", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { call, close } = await app(conn);
+    let phoneOnly;
+    try {
+      // A phone-only principal, then a second member of the household who
+      // registers the same handset with an email. phoneHash is deliberately
+      // non-unique, so resolving by contact hash leaves two candidates and the
+      // winner is decided by insertion order rather than by anything asserted.
+      phoneOnly = (await (
+        await call("POST", "/consent", {
+          pii: { name: "Asha", phone: "9876543210", dob: "1970-04-01" },
+          consentTypes: ["marketing"],
+        })
+      ).json()).principalId;
+
+      const second = await call("POST", "/consent", {
+        pii: { name: "Riya", email: "riya@example.com", phone: "9876543210", dob: "1995-06-15" },
+        consentTypes: ["analytics"],
+      });
+      assert.equal(second.status, 201);
+    } finally {
+      await close();
+    }
+
+    // Snapshot rather than assert on one event type: Riya's own signup already
+    // recorded underwriting as "denied", so counting that type would fail on
+    // her own history rather than on anything Asha's update did.
+    const housemateBefore = await models.ConsentRecord.findOne({ principalId: { $ne: phoneOnly } }).lean();
+
+    const { call: asAsha, close: closeAsha } = await app(conn, { resolvePrincipal: () => phoneOnly });
+    try {
+      const res = await asAsha("PUT", "/consent", { consentTypes: ["underwriting"] });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.principalId, phoneOnly, "the write must land on the session principal, not a housemate");
+      assert.equal(body.state.underwriting.status, "granted");
+      assert.equal(await models.Principal.countDocuments({}), 2);
+
+      const housemateAfter = await models.ConsentRecord.findOne({ principalId: housemateBefore.principalId }).lean();
+      assert.equal(JSON.stringify(housemateAfter.events), JSON.stringify(housemateBefore.events),
+        "the housemate's ledger must be untouched");
+    } finally {
+      await closeAsha();
     }
   });
 });
@@ -263,6 +386,39 @@ test("a form posting one ticked checkbox is accepted, and an all-unchecked one r
       assert.equal(piiOnly.status, 201);
       assert.equal((await piiOnly.json()).state.marketing, undefined,
         "omitting the marker must stay 'no consent decision', not become a decline");
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("a form-encoded withdrawal with one ticked box is accepted on both methods", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+    const { principalId } = await persistPIIwithconsent({
+      models,
+      pii: PII,
+      consentTypes: ["marketing", "analytics"],
+    });
+
+    const { form, close } = await app(conn, { resolvePrincipal: () => principalId });
+    try {
+      // POST exists because an HTML form cannot issue PUT, and this is the one
+      // route where a wrong asArray would 400 a data principal exercising a
+      // statutory right - urlencoded sends a single ticked box as a STRING.
+      const posted = await form("POST", "/consent/withdraw", { consentTypes: "marketing" });
+      assert.equal(posted.status, 200, "a single ticked box must not fail array validation");
+      assert.deepEqual((await posted.json()).withdrawn, ["marketing"]);
+
+      const put = await form("PUT", "/consent/withdraw", { consentTypes: "analytics" });
+      assert.equal(put.status, 200);
+      assert.deepEqual((await put.json()).withdrawn, ["analytics"]);
+
+      const record = await models.ConsentRecord.findOne({ principalId });
+      const state = record.currentState();
+      assert.equal(state.marketing.status, "withdrawn");
+      assert.equal(state.analytics.status, "withdrawn");
     } finally {
       await close();
     }

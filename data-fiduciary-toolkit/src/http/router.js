@@ -55,6 +55,22 @@ function isTrue(value) {
 /** Wraps an async handler so a rejection reaches the error mapper below. */
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+/**
+ * @param {object}   opts
+ * @param {object}   opts.db                - the connection returned by connect(). Required.
+ * @param {Function} [opts.resolvePrincipal] - (req) => principalId | Promise<principalId>.
+ *   The host application's session lookup. Required for every mutating route
+ *   except signup; without it they all deny, so a misconfigured deployment
+ *   fails closed.
+ * @param {Function} [opts.onWithdrawal]    - called by withdrawConsent when something
+ *   was actually withdrawn. A throw here DOES fail the request: this hook is how
+ *   the host learns it must cease processing and erase, and a host whose pipeline
+ *   is down needs to know rather than have the failure swallowed.
+ * @param {Function} [opts.onGrievanceFiled] - called after a grievance is persisted.
+ *   A throw here is logged and does NOT fail the request - the grievance is
+ *   already filed, and failing the response would cost the principal their refId
+ *   and produce a duplicate filing. Notification is not the filing.
+ */
 function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } = {}) {
   if (!db || typeof db.model !== "function") {
     throw new Error("db is required - pass the connection returned by connect()");
@@ -166,6 +182,11 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
 
       const result = await persistPIIwithconsent({
         models,
+        // Identity is passed explicitly. Without it the service re-derives it
+        // from pii by contact hash, which on an authenticated update is both
+        // ambiguous (phoneHash is non-unique) and, after a PRINCIPAL_ID_SECRET
+        // rotation, capable of minting a NEW principal from a stale hash.
+        principalId: req.principalId,
         pii: principal.pii.toObject(),
         consentTypes: readConsentTypes(req.body),
         regrant: isTrue(req.body.regrant),
@@ -238,8 +259,16 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
         subject: req.body.subject,
         description: req.body.description,
       });
+      // The grievance is already persisted. A throwing host callback must not
+      // turn that into a 500, because the principal would never learn their
+      // refId and would re-file, creating a duplicate grievance for the
+      // Grievance Officer to reconcile. Notification is not the filing.
       if (typeof onGrievanceFiled === "function") {
-        await onGrievanceFiled({ principalId: req.principalId, ...result });
+        try {
+          await onGrievanceFiled({ principalId: req.principalId, ...result });
+        } catch (hookErr) {
+          console.error("[dpdp-toolkit] onGrievanceFiled threw after the grievance was filed:", hookErr);
+        }
       }
       if (req.accepts("html")) {
         return res
