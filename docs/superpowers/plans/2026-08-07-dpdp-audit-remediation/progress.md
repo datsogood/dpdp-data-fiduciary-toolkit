@@ -537,3 +537,22 @@ CONTROLLER ERROR, second occurrence of the same class: I launched the whole-bran
   including review agents, not just implementers.
   Resolution: let the review finish, then resume the implementer to verify and commit. Adding
   load now would corrupt the last gate's own test results.
+
+FINAL: test infrastructure, second pass (commit 5e7b845). The suite was non-deterministic -
+  159/159 on one run and 135/160 on the next, same commit. I called it contention three times;
+  twice I was right, which is exactly what made the third time dangerous. What broke the loop
+  was running ONE suite and reading the actual exception instead of inferring from counts:
+  `StdoutInstanceError: Port "61513" already in use` from MongoMemoryServer.create(), and
+  MongoInstance.js:360 confirms the library does NOT retry a busy port.
+  A full run started 17 mongod instances - 1 pretest, 11 pooled (one per forked test file, a
+  count that grew silently as tasks added files), 5 created directly by connection.test.js.
+  The earlier 76->8 pooling fix was right but did not HOLD, because the file count grows.
+  Fixed properly: one mongod for the whole suite via node --test-global-setup, each test getting
+  its own database on it. 17 -> 1. connection.test.js needed zero of its own - distinct db names
+  on one server are distinct URIs, which is what its tests actually assert, and connect() was
+  verified to have no cache before that call was made. mongod version pinned at last (the plan
+  called for it and it never landed). Nine green runs: six by the implementer, three by me at
+  160/160 each WITH two stray mongods competing throughout.
+  LESSON, third occurrence: read the error, do not pattern-match the symptom. I had a
+  contention explanation that fit and kept reaching for it rather than looking at one exception.
+FINAL: 160/160, ready for PR.
