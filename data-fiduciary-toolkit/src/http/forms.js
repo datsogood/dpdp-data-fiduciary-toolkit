@@ -44,29 +44,62 @@ const baseStyle = `
  * "/rights/exercise" and so on with no special case.
  */
 
-/** GET page: "Data Principal Rights" - lists rights, each with its own request form. */
+/**
+ * The two rights that are NOT a request someone actions later, and the page
+ * that actually delivers each one.
+ *
+ * Withdrawal takes effect immediately and exerciseRight refuses the key
+ * outright; a grievance carries its own SLA and escalation path and
+ * complaintToTheBoard owns it. Rendering either as a request form gave a data
+ * principal a submit button that always failed - the withdrawal one answered
+ * a browser with the bare text "Use withdrawConsent (PUT or POST
+ * /consent/withdraw)", an instruction naming an HTTP verb, which a
+ * non-technical beneficiary cannot act on. Filtering them away instead (which
+ * is what grievance got) told them less than the Act gives them.
+ *
+ * So both are stated, like every other right, and both link to the route that
+ * performs them.
+ */
+const LINKED_RIGHTS = {
+  withdrawal: { path: "/consent/withdraw", label: "Withdraw consent now" },
+  grievance: { path: "/grievance/new", label: "Raise a grievance" },
+};
+
+/**
+ * GET page: "Data Principal Rights" - lists every right in Chapter III. Each
+ * one either carries its own request form or links to the page that delivers
+ * it directly; see LINKED_RIGHTS for which and why.
+ */
 function renderRightsPage({ basePath = "" } = {}) {
   const action = escapeHtml(`${basePath}/rights/exercise`);
-  const cards = RIGHTS_CATALOG.filter((r) => r.key !== "grievance")
-    .map(
-      (r) => `
-    <div class="card">
+  const cards = RIGHTS_CATALOG.map((r) => {
+    const heading = `
       <div class="right-title">${escapeHtml(r.title)}</div>
       <div class="right-meta">${escapeHtml(r.section)}</div>
-      <p style="font-size:0.85rem;">${escapeHtml(r.description)}</p>
+      <p style="font-size:0.85rem;">${escapeHtml(r.description)}</p>`;
+
+    const linked = LINKED_RIGHTS[r.key];
+    if (linked) {
+      return `
+    <div class="card">${heading}
+      <p><a href="${escapeHtml(`${basePath}${linked.path}`)}">${escapeHtml(linked.label)}</a></p>
+    </div>`;
+    }
+
+    return `
+    <div class="card">${heading}
       <form method="POST" action="${action}">
         <input type="hidden" name="right" value="${escapeHtml(r.key)}" />
         <label>Details (optional)</label>
         <textarea name="details" rows="2" placeholder="e.g. which field to correct"></textarea>
         <button type="submit">Request this</button>
       </form>
-    </div>`
-    )
-    .join("");
+    </div>`;
+  }).join("");
 
   return `<!doctype html><html><head><style>${baseStyle}</style></head><body>
     <h1>Your rights with ${escapeHtml(FIDUCIARY.name)}</h1>
-    <p class="lede">Chapter III, Digital Personal Data Protection Act, 2023. Submitting a request here logs it and gives you a reference ID.</p>
+    <p class="lede">Chapter III, Digital Personal Data Protection Act, 2023. Submitting a request here logs it and gives you a reference ID. Withdrawal and grievance redressal are linked rather than logged as requests - they take effect through their own pages.</p>
     ${cards}
   </body></html>`;
 }
@@ -108,11 +141,24 @@ function renderConsentManagerForm({ basePath = "" } = {}) {
  * the request for consent. A purpose whose lawful basis is a Section 7
  * legitimate use is not a choice the data principal gets to make, so it is
  * stated here, never rendered as a checkbox - only consent-based purposes are.
+ *
+ * RENDERS THE WHOLE NOTICE OBJECT, not a selection from it. It used to
+ * interpolate the fiduciary's name, the purposes and one withdrawal sentence,
+ * and drop the rest: the itemised personal data, every named right, the
+ * grievance and Board complaint route, the DPO contact, and every link. POST
+ * /consent then stored a NoticeVersion containing all of it and stamped its
+ * hash on every event - so the fiduciary's own evidence asserted the data
+ * principal had been told things this page never displayed. The page and the
+ * evidence have to be the same document, and test/browser.test.js asserts
+ * that every top-level key of the stored notice appears here.
  */
 function renderConsentPage({ basePath = "", notice } = {}) {
   const action = escapeHtml(`${basePath}/consent`);
+  const url = (path) => escapeHtml(`${basePath}${path}`);
   const consentPurposes = notice.purposes.filter((p) => p.lawfulBasis.kind === "consent");
   const statedPurposes = notice.purposes.filter((p) => p.lawfulBasis.kind !== "consent");
+
+  const retention = (p) => `<div class="right-meta">Kept for ${escapeHtml(p.retentionMonths)} months.</div>`;
 
   const stated = statedPurposes
     .map(
@@ -121,6 +167,7 @@ function renderConsentPage({ basePath = "", notice } = {}) {
       <div class="right-title">${escapeHtml(p.title)}</div>
       <div class="right-meta">${escapeHtml(p.lawfulBasis.clause)}</div>
       <p style="font-size:0.85rem;">${escapeHtml(p.purpose)} ${escapeHtml(p.lawfulBasis.description)}.</p>
+      ${retention(p)}
     </div>`
     )
     .join("");
@@ -131,6 +178,7 @@ function renderConsentPage({ basePath = "", notice } = {}) {
     <div class="card">
       <div class="right-title">${escapeHtml(p.title)}</div>
       <p style="font-size:0.85rem;">${escapeHtml(p.purpose)}</p>
+      ${retention(p)}
       <label style="font-weight:400;">
         <input type="checkbox" name="consentTypes" value="${escapeHtml(p.type)}" style="width:auto;display:inline-block;margin-right:0.4rem;vertical-align:middle;" />
         I consent to this
@@ -139,9 +187,26 @@ function renderConsentPage({ basePath = "", notice } = {}) {
     )
     .join("");
 
-  return `<!doctype html><html><head><style>${baseStyle}</style></head><body>
+  // Rule 3(b)(i) - the itemised description of the personal data itself, not
+  // just the purposes it is used for.
+  const personalData = notice.personalData
+    .map((d) => `<li><b>${escapeHtml(d.field)}</b> - ${escapeHtml(d.description)}</li>`)
+    .join("");
+
+  // Every right the notice enumerates, including the two the rights page
+  // links rather than logs. Naming them here is what makes the stored notice
+  // an accurate record of what this page said.
+  const rights = notice.rights
+    .map((r) => `<li><b>${escapeHtml(r.title)}</b> (${escapeHtml(r.section)}) - ${escapeHtml(r.description)}</li>`)
+    .join("");
+
+  return `<!doctype html><html lang="${escapeHtml(notice.language)}"><head><style>${baseStyle}</style></head><body>
     <h1>Notice and consent - ${escapeHtml(notice.fiduciary.name)}</h1>
-    <p class="lede">Digital Personal Data Protection Act, 2023, Section 5. This is what we collect, why, and on what basis.</p>
+    <p class="lede">${escapeHtml(notice.statute)}, Section 5. This is what we collect, why, and on what basis.</p>
+
+    <h2 style="font-size:1rem;">The personal data we collect</h2>
+    <div class="card"><ul style="font-size:0.85rem;">${personalData}</ul></div>
+
     <h2 style="font-size:1rem;">We already have a lawful basis for these - they are not a choice</h2>
     ${stated}
     <form method="POST" action="${action}">
@@ -159,6 +224,24 @@ function renderConsentPage({ basePath = "", notice } = {}) {
       <p style="font-size:0.75rem;">${escapeHtml(notice.withdrawal.description)}</p>
       <button type="submit">Submit</button>
     </form>
+
+    <h2 style="font-size:1rem;">Your rights</h2>
+    <div class="card">
+      <ul style="font-size:0.85rem;">${rights}</ul>
+      <p style="font-size:0.85rem;"><a href="${url("/rights")}">See and exercise your rights</a> &middot;
+        <a href="${url(notice.withdrawal.path)}">Withdraw consent</a></p>
+    </div>
+
+    <h2 style="font-size:1rem;">If something goes wrong</h2>
+    <div class="card">
+      <p style="font-size:0.85rem;">${escapeHtml(notice.grievance.route)}</p>
+      <p style="font-size:0.85rem;">We aim to resolve a grievance within ${escapeHtml(notice.grievance.slaDays)} days.</p>
+      <p style="font-size:0.85rem;">${escapeHtml(notice.boardComplaint.description)}</p>
+      <p style="font-size:0.85rem;"><a href="${url(notice.boardComplaint.grievancePath)}">Raise a grievance</a></p>
+      <p style="font-size:0.85rem;">Our Data Protection Officer is ${escapeHtml(notice.dpo.name)}, at ${escapeHtml(notice.dpo.email)}.</p>
+    </div>
+
+    <p class="lede">Notice version ${escapeHtml(notice.version)}, generated ${escapeHtml(new Date(notice.generatedAt).toISOString())}. We store this version with your consent, so we can always show you exactly what you were told.</p>
   </body></html>`;
 }
 
