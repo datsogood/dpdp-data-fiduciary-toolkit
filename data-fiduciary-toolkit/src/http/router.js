@@ -1,5 +1,8 @@
 const express = require("express");
 
+const { buildModels } = require("../models");
+const { AppError } = require("../utils/errors");
+const { findPrincipalByContact, findPrincipalById, lookupHash } = require("../utils/principalId");
 const persistPIIwithconsent = require("../services/persistPIIwithconsent");
 const withdrawConsent = require("../services/withdrawConsent");
 const { listRights, exerciseRight } = require("../services/dataPrincipalRights");
@@ -7,82 +10,312 @@ const { complaintToTheBoard, escalateToBoard } = require("../services/complaintT
 const consentManagerRequest = require("../services/consentManagerRequest");
 const { renderRightsPage, renderGrievanceForm, renderConsentManagerForm } = require("./forms");
 
-function createRouter() {
+/**
+ * An HTML checkbox group sends one value as a string and two as an array, so a
+ * single ticked box would otherwise fail array validation.
+ */
+function asArray(value) {
+  if (value === undefined || value === null) return undefined;
+  return Array.isArray(value) ? value : [value];
+}
+
+/**
+ * The consent form always posts a hidden consentSubmitted=1, so an
+ * all-unchecked submission is a real decision ("decline everything") rather
+ * than being mistaken for a PII-only update that touches no consent.
+ */
+function readConsentTypes(body) {
+  const types = asArray(body.consentTypes);
+  if (types !== undefined) return types;
+  return body.consentSubmitted ? [] : undefined;
+}
+
+/**
+ * Accepts both wire shapes: nested { pii: {...} } from JSON API clients and
+ * flat top-level fields from an HTML form. Never spreads req.body wholesale
+ * into pii - that would let a caller inject arbitrary schema paths.
+ */
+function readPii(body) {
+  if (body.pii && typeof body.pii === "object") return body.pii;
+  const { name, email, phone, dob, pan, address } = body;
+  const pii = { name, email, phone, dob, pan, address };
+  for (const k of Object.keys(pii)) if (pii[k] === undefined) delete pii[k];
+  return pii;
+}
+
+/**
+ * A form checkbox arrives as the string "on"; a JSON client sends a real
+ * boolean. Without this, urlencoded's "false" would be truthy and a form
+ * could never express "no".
+ */
+function isTrue(value) {
+  return value === true || value === "true" || value === "on" || value === "1";
+}
+
+/** Wraps an async handler so a rejection reaches the error mapper below. */
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } = {}) {
+  if (!db || typeof db.model !== "function") {
+    throw new Error("db is required - pass the connection returned by connect()");
+  }
+  const models = buildModels(db);
   const router = express.Router();
-  router.use(express.json());
-  router.use(express.urlencoded({ extended: true }));
+  router.use(express.json({ limit: "100kb" }));
+  // extended:true is what let a cross-origin form build principalId[$ne].
+  // extended:false produces only string values, removing that delivery path.
+  router.use(express.urlencoded({ extended: false, limit: "100kb" }));
 
-  // 1. POST /consent — persistPIIwithconsent
-  router.post("/consent", async (req, res) => {
+  /**
+   * Identity comes only from the host application. principalId is never read
+   * from the request body: it is a database key, not a credential, and an
+   * earlier version let anyone who knew a data principal's email act as them.
+   *
+   * With no resolvePrincipal configured every mutating route denies, so a
+   * misconfigured deployment fails closed rather than open.
+   *
+   * The hook may be sync or async - resolving a session to a principal is
+   * usually a database lookup, and a non-awaited Promise would fail the string
+   * check and 401 every request with nothing to explain why.
+   */
+  async function requireAuth(req, res, next) {
+    if (typeof resolvePrincipal !== "function") {
+      return res.status(401).json({ error: "authentication required" });
+    }
+    let id;
     try {
-      const result = await persistPIIwithconsent(req.body);
+      id = await resolvePrincipal(req);
+    } catch {
+      return res.status(401).json({ error: "authentication required" });
+    }
+    if (typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id)) {
+      return res.status(401).json({ error: "authentication required" });
+    }
+    req.principalId = id;
+    next();
+  }
+
+  /**
+   * Refuses contact details that are not the signed-in principal's own.
+   *
+   * persistPIIwithconsent resolves a principal through findOrCreatePrincipal,
+   * i.e. by contact hash. Passing a caller-supplied email into it would let any
+   * authenticated principal overwrite a DIFFERENT person's PII and ledger - C1
+   * again, merely requiring an account. Comparing against the session
+   * principal's own stored hash refuses that without a lookup, so it also adds
+   * no way to probe which addresses are registered.
+   */
+  function assertOwnContact(principal, pii) {
+    const mismatch =
+      (pii.email && lookupHash(pii.email) !== principal.emailHash) ||
+      (pii.phone && lookupHash(pii.phone) !== principal.phoneHash);
+    if (mismatch) {
+      throw new AppError(
+        "The contact details supplied do not belong to the signed-in data principal. Use the correction route to change them.",
+        403
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Consent
+  // ---------------------------------------------------------------------------
+
+  /**
+   * SIGNUP ONLY, and deliberately unauthenticated - a person has no account
+   * until this succeeds, so requiring one would make the toolkit unusable.
+   *
+   * The existence check therefore runs BEFORE any write. Deciding afterwards by
+   * reading persistPIIwithconsent's `created` flag would return the same 409
+   * with the existing principal's name, phone, PAN and address already
+   * overwritten and consent events already appended to an append-only ledger -
+   * the whole of the C1 attack, behind a response that looks like a refusal.
+   */
+  router.post(
+    "/consent",
+    wrap(async (req, res) => {
+      const pii = readPii(req.body);
+      const existing = await findPrincipalByContact({ models, email: pii.email, phone: pii.phone });
+      if (existing) {
+        throw new AppError("principal already exists - sign in to change your consent", 409);
+      }
+      const result = await persistPIIwithconsent({ models, pii, consentTypes: readConsentTypes(req.body) });
       res.status(201).json(result);
-    } catch (err) {
-      res.status(400).json({ error: err.message });
-    }
-  });
+    })
+  );
 
-  // 2. PUT /consent/withdraw — withdrawConsent
-  router.put("/consent/withdraw", async (req, res) => {
-    try {
-      const result = await withdrawConsent(req.body);
+  /**
+   * AUTHENTICATED consent update. The principal is loaded by req.principalId
+   * and the PII handed to the service is the STORED record, never the payload,
+   * so there is no contact detail a caller can supply that redirects the write
+   * at another person. Correcting contact details is a separate operation.
+   */
+  router.put(
+    "/consent",
+    requireAuth,
+    wrap(async (req, res) => {
+      const principal = await findPrincipalById({ models, principalId: req.principalId });
+      if (!principal) throw new AppError("No principal found for that id", 404);
+      // Erasure is terminal - see updatePrincipalContact. Without this an
+      // erased record would fail later with a confusing message about a
+      // missing name rather than saying what actually happened.
+      if (principal.erasedAt) {
+        throw new AppError("This data principal's record has been erased and cannot be updated", 409);
+      }
+      assertOwnContact(principal, readPii(req.body));
+
+      const result = await persistPIIwithconsent({
+        models,
+        pii: principal.pii.toObject(),
+        consentTypes: readConsentTypes(req.body),
+        regrant: isTrue(req.body.regrant),
+      });
       res.status(200).json(result);
-    } catch (err) {
-      res.status(400).json({ error: err.message });
-    }
-  });
+    })
+  );
 
-  // 3. Data Principal Rights page + request submission
+  /**
+   * Withdrawal. PUT is for API clients; POST exists because an HTML form
+   * cannot issue PUT, and without it the withdrawal page has nothing to
+   * submit to.
+   *
+   * asArray rather than readConsentTypes: a withdrawal naming no purpose is an
+   * error, not a decline, and the service already answers it with a 400.
+   */
+  const withdraw = wrap(async (req, res) => {
+    const result = await withdrawConsent({
+      models,
+      principalId: req.principalId,
+      consentTypes: asArray(req.body.consentTypes),
+      onWithdrawal,
+    });
+    res.status(200).json(result);
+  });
+  router.put("/consent/withdraw", requireAuth, withdraw);
+  router.post("/consent/withdraw", requireAuth, withdraw);
+
+  // ---------------------------------------------------------------------------
+  // Data principal rights - Chapter III
+  // ---------------------------------------------------------------------------
+
+  // Public: the catalog is static information about rights everyone holds.
   router.get("/rights", (req, res) => {
     if (req.accepts("html")) return res.type("html").send(renderRightsPage());
     res.json(listRights());
   });
-  router.post("/rights/exercise", async (req, res) => {
-    try {
-      const result = await exerciseRight(req.body);
+
+  router.post(
+    "/rights/exercise",
+    requireAuth,
+    wrap(async (req, res) => {
+      const result = await exerciseRight({
+        models,
+        principalId: req.principalId,
+        right: req.body.right,
+        details: req.body.details,
+      });
       if (req.accepts("html")) {
         return res.type("html").send(`<p>Request received. Reference: <b>${result.refId}</b></p>`);
       }
       res.status(201).json(result);
-    } catch (err) {
-      res.status(400).json({ error: err.message });
-    }
-  });
+    })
+  );
 
-  // 4. complaintToTheBoard — opens a grievance form addressed to the DPO
+  // ---------------------------------------------------------------------------
+  // Grievance redressal - Section 13
+  // ---------------------------------------------------------------------------
+
+  // Public: the form itself reveals nothing.
   router.get("/grievance/new", (req, res) => res.type("html").send(renderGrievanceForm()));
-  router.post("/grievance", async (req, res) => {
-    try {
-      const result = await complaintToTheBoard(req.body);
+
+  router.post(
+    "/grievance",
+    requireAuth,
+    wrap(async (req, res) => {
+      const result = await complaintToTheBoard({
+        models,
+        principalId: req.principalId,
+        subject: req.body.subject,
+        description: req.body.description,
+      });
+      if (typeof onGrievanceFiled === "function") {
+        await onGrievanceFiled({ principalId: req.principalId, ...result });
+      }
       if (req.accepts("html")) {
-        return res.type("html").send(`<p>Sent to ${result.addressedTo}. Reference: <b>${result.refId}</b>. SLA: ${result.slaDueAt}</p>`);
+        return res
+          .type("html")
+          .send(
+            `<p>Sent to ${result.addressedTo}. Reference: <b>${result.refId}</b>. SLA: ${result.slaDueAt}</p>`
+          );
       }
       res.status(201).json(result);
-    } catch (err) {
-      res.status(400).json({ error: err.message });
-    }
-  });
-  router.post("/grievance/:refId/escalate", async (req, res) => {
-    try {
-      const result = await escalateToBoard({ refId: req.params.refId });
-      res.status(200).json(result);
-    } catch (err) {
-      res.status(400).json({ error: err.message });
-    }
-  });
+    })
+  );
 
-  // 5. consentManagerRequest — opens a form to raise a request to a Consent Manager
+  router.post(
+    "/grievance/:refId/escalate",
+    requireAuth,
+    wrap(async (req, res) => {
+      const result = await escalateToBoard({
+        models,
+        refId: req.params.refId,
+        principalId: req.principalId,
+      });
+      res.status(200).json(result);
+    })
+  );
+
+  // ---------------------------------------------------------------------------
+  // Consent Manager handoff - Section 6(7)-(9)
+  // ---------------------------------------------------------------------------
+
+  // Public: the form itself reveals nothing.
   router.get("/consent-manager/new", (req, res) => res.type("html").send(renderConsentManagerForm()));
-  router.post("/consent-manager", async (req, res) => {
-    try {
-      const result = await consentManagerRequest(req.body);
+
+  router.post(
+    "/consent-manager",
+    requireAuth,
+    wrap(async (req, res) => {
+      const result = await consentManagerRequest({
+        models,
+        principalId: req.principalId,
+        message: req.body.message,
+        preferredConsentManager: req.body.preferredConsentManager,
+      });
       if (req.accepts("html")) {
         return res.type("html").send(`<p>Request received. Reference: <b>${result.refId}</b></p>`);
       }
       res.status(201).json(result);
-    } catch (err) {
-      res.status(400).json({ error: err.message });
+    })
+  );
+
+  // ---------------------------------------------------------------------------
+  // One error mapper, registered LAST. Replaces the six per-route catch blocks
+  // that turned every fault into 400 with a raw internal message.
+  // ---------------------------------------------------------------------------
+  router.use((err, req, res, _next) => {
+    // Branch order matters, and each branch closes a specific hole.
+
+    // Mongoose input faults are the CLIENT's fault. CastError included: sending
+    // pii.pan as an object or a malformed date produces one, and reporting that
+    // as 500 would repeat the bug in the opposite direction. Send the field
+    // name, not mongoose's raw text - that text quotes the offending value back.
+    if (err && (err.name === "ValidationError" || err.name === "CastError")) {
+      const fields = err.errors ? Object.keys(err.errors).join(", ") : err.path;
+      return res.status(400).json({ error: `Invalid value for: ${fields}` });
     }
+
+    // A deliberate AppError below 500 is safe to echo - the message is written
+    // for the caller. At or above 500 it is NOT: AppError(..., 500) carries
+    // internal configuration detail (utils/principalId.js throws one naming
+    // PRINCIPAL_ID_SECRET and how to generate it, and that path is reachable
+    // from the unauthenticated POST /consent route).
+    if (err && typeof err.status === "number" && err.status < 500) {
+      return res.status(err.status).json({ error: err.message });
+    }
+
+    console.error("[dpdp-toolkit] unhandled error:", err);
+    res.status(err && typeof err.status === "number" ? err.status : 500).json({ error: "internal error" });
   });
 
   return router;

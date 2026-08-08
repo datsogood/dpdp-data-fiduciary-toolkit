@@ -1,4 +1,5 @@
 const { generateDocRef } = require("../utils/principalId");
+const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
 
 /**
  * Raises a request to speak to / be connected with a Consent Manager — a
@@ -15,8 +16,13 @@ const { generateDocRef } = require("../utils/principalId");
  * @returns {Promise<{ refId, status }>}
  */
 async function consentManagerRequest({ models, principalId, message, preferredConsentManager = "" } = {}) {
-  if (!principalId) throw new Error("principalId is required");
-  if (!message) throw new Error("message is required");
+  // AppError, not Error: a plain Error has no .status, so the router's error
+  // mapper would report a malformed request as 500 "internal error". The
+  // lengths match the schema's maxlength, so a value that would fail
+  // validation on save is refused here with a message that names the field.
+  assertPrincipalId(principalId);
+  assertNonEmptyString(message, "message", 5000);
+  if (preferredConsentManager) assertNonEmptyString(preferredConsentManager, "preferredConsentManager", 200);
 
   const request = await models.ConsentManagerRequest.create({
     principalId,

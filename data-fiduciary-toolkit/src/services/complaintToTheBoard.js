@@ -1,5 +1,7 @@
 const { FIDUCIARY } = require("../config/catalog");
 const { generateDocRef } = require("../utils/principalId");
+const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
+const { AppError } = require("../utils/errors");
 
 /**
  * Files a grievance. Named to match what the person clicks ("complain to
@@ -16,8 +18,13 @@ const { generateDocRef } = require("../utils/principalId");
  * @returns {Promise<{ refId, addressedTo, slaDueAt }>}
  */
 async function complaintToTheBoard({ models, principalId, subject, description } = {}) {
-  if (!principalId) throw new Error("principalId is required");
-  if (!subject || !description) throw new Error("subject and description are required");
+  // AppError, not Error: a plain Error has no .status, so the router's error
+  // mapper would report a malformed request as 500 "internal error". The
+  // lengths match the schema's maxlength, so a value that would fail
+  // validation on save is refused here with a message that names the field.
+  assertPrincipalId(principalId);
+  assertNonEmptyString(subject, "subject", 200);
+  assertNonEmptyString(description, "description", 10000);
 
   const now = new Date();
   const slaDueAt = new Date(now.getTime() + FIDUCIARY.grievanceSlaDays * 24 * 60 * 60 * 1000);
@@ -47,14 +54,30 @@ async function complaintToTheBoard({ models, principalId, subject, description }
  * Escalates an existing grievance to the Data Protection Board. Only
  * meaningful once the SLA has lapsed without resolution — enforced here
  * rather than left to the caller.
+ *
+ * principalId is required and is compared against the grievance's owner. The
+ * router takes it from resolvePrincipal, never from the request.
  */
 async function escalateToBoard({ models, refId, principalId } = {}) {
-  if (!refId) throw new Error("refId is required");
+  assertNonEmptyString(refId, "refId", 64);
+  // principalId is now required. Without it this took any refId and never
+  // consulted the grievance's owner, so anyone holding or guessing a GR-
+  // reference could escalate someone else's complaint (M8).
+  assertPrincipalId(principalId);
+
   const grievance = await models.Grievance.findOne({ refId });
-  if (!grievance) throw new Error("No grievance found with that reference");
-  if (grievance.status === "resolved") throw new Error("This grievance is already marked resolved");
+  if (!grievance) throw new AppError("No grievance found with that reference", 404);
+  // Ownership is checked before state, so the SLA and resolution messages
+  // below cannot be used to read the status of a grievance that is not yours.
+  if (grievance.principalId !== principalId) {
+    throw new AppError("This grievance does not belong to you", 403);
+  }
+  if (grievance.status === "resolved") throw new AppError("This grievance is already marked resolved", 409);
   if (new Date() < grievance.slaDueAt) {
-    throw new Error(`The Grievance Officer's SLA hasn't lapsed yet (due ${grievance.slaDueAt.toISOString()})`);
+    throw new AppError(
+      `The Grievance Officer's SLA hasn't lapsed yet (due ${grievance.slaDueAt.toISOString()})`,
+      409
+    );
   }
 
   grievance.status = "escalated";

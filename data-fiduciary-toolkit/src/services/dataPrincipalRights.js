@@ -1,5 +1,7 @@
 const { RIGHTS_CATALOG } = require("../config/catalog");
 const { generateDocRef } = require("../utils/principalId");
+const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
+const { AppError } = require("../utils/errors");
 
 /** Powers the "Data Principal Rights" page — just the static catalog, Chapter III. */
 function listRights() {
@@ -20,11 +22,21 @@ function listRights() {
  * @returns {Promise<{ refId: string, right: string, status: string }>}
  */
 async function exerciseRight({ models, principalId, right, details = "" } = {}) {
-  if (!principalId) throw new Error("principalId is required");
+  // A plain Error has no .status and name === "Error", so the router's error
+  // mapper would report every malformed request here as 500 "internal error".
+  // These are deliberate rejections written for the caller - they carry their
+  // own status.
+  assertPrincipalId(principalId);
+  assertNonEmptyString(right, "right", 64);
+  if (details !== undefined && details !== "") assertNonEmptyString(details, "details", 5000);
+
   const entry = RIGHTS_CATALOG.find((r) => r.key === right);
-  if (!entry) throw new Error(`Unknown right: ${right}`);
+  if (!entry) throw new AppError(`Unknown right: ${right}`, 400);
   if (right === "grievance") {
-    throw new Error("Use complaintToTheBoard to raise a grievance — it carries its own SLA and escalation path");
+    throw new AppError(
+      "Use complaintToTheBoard to raise a grievance - it carries its own SLA and escalation path",
+      400
+    );
   }
 
   const request = await models.RightsRequest.create({
