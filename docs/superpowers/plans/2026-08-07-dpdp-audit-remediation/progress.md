@@ -437,3 +437,15 @@ PULLING TEST INFRASTRUCTURE FORWARD from T14. The mongod-per-withDb flake has no
   so exposure grows monotonically - and four tasks plus the whole-branch review still depend on
   a trustworthy suite. Fixing it now rather than at T14, where it would only protect the last
   task's own verification.
+TEST INFRA FIXED (commit 739fb3b), pulled forward from T14. One mongod per PROCESS - so one per
+  test file under node --test, 8 rather than 76 - with each withDb getting a fresh database on
+  it, plus a pretest binary warm-up. Results: 105/105 across five consecutive runs, no flakes;
+  38.4s -> ~19s. Cold cache passes first time, verified against both real cache locations.
+  I independently confirmed run 1 at 105/105 in 18.3s.
+  Implementer's two honest notes: (a) it put warm-binary.js in scripts/ not test/helpers/,
+  because node --test counts any file under test/ as a phantom test - and test/helpers/db.js
+  ALREADY does this, so the 105 baseline includes one phantom; (b) it could not reproduce the
+  original cold-cache lock race on this mongodb-memory-server version, which has a proper
+  lock-wait, and kept pretest anyway because it removes the race by construction.
+  T14 Step 4b replaced with a re-verification step: run the suite three times at the end of the
+  branch rather than assuming it stayed fixed while six tasks added tests.

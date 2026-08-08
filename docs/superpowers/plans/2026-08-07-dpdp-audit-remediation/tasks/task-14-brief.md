@@ -132,48 +132,13 @@ Add a header comment to the file giving the end-to-end demo sequence: `POST /con
 
 Every documented request and response must match the implementation exactly - the audit found four of the negotiating routes documented wrongly. Include: the new auth requirement and `resolvePrincipal`, the `denied` status, `regrant`, `receiptId` vs `docRef`, `dob` and parental consent, the read endpoints, the lifecycle functions, `onWithdrawal`/`onGrievanceFiled`, and `erasePrincipalPII`. Add a "Migrating from 0.1.0" section stating plainly that `principalId` values from 0.1.0 are email hashes and cannot be carried over.
 
-- [ ] **Step 4b: Make the suite survive a cold start, and stop it compounding**
+- [ ] **Step 4b: (done early) Test infrastructure was fixed before Task 11**
 
-Two related problems, both observed for real during this branch:
+The suite booted one `mongod` per `withDb` call - 76 per full run - which collided on ports often enough to fail whole runs during Tasks 5 and 10, and had grown from 8s to 38s. Waiting until here would have protected only this task's own verification while four earlier tasks and the whole-branch review ran against an unreliable gate, so it was pulled forward.
 
-1. **A cold `mongodb-memory-server` binary cache fails the suite.** `node --test` runs one process per test file, and each calls `MongoMemoryServer.create()`. On a machine that has never downloaded the mongod binary, all of them race for `~/.cache/mongodb-binaries/<version>.lock`, and the losers fail. Observed: 3 of 56 tests failed, each the *first* test in its file, each in about 11ms, with the lock path in the error. So a fresh clone's very first `npm test` fails - and then passes on the second run, which is the worst possible first impression for a compliance toolkit whose selling point is a defensible test suite.
+Now one server per process (so one per test file under `node --test`, 8 rather than 76), each `withDb` getting a fresh database on it, plus a `pretest` binary warm-up. Result: 105/105 across five consecutive runs with no flakes, and 38.4s down to about 19s.
 
-2. **Runtime is compounding.** 8s at Task 2, ~28s by Task 7, and every task since has added a file with its own server.
-
-Fix both by warming the binary once and sharing one server across files. Add to `package.json`:
-
-```json
-"scripts": {
-  "pretest": "node test/helpers/warm-binary.js",
-  "test": "node --test"
-}
-```
-
-```js
-// test/helpers/warm-binary.js
-// Downloads and extracts the mongod binary once, before node --test forks a
-// process per test file. Without this, a cold cache means every file races for
-// ~/.cache/mongodb-binaries/<version>.lock and the losers fail on their first
-// test - so a fresh clone's first `npm test` fails and the second passes.
-const { MongoMemoryServer } = require("mongodb-memory-server");
-
-(async () => {
-  const server = await MongoMemoryServer.create();
-  await server.stop();
-})().catch((err) => {
-  console.error("could not prepare the in-memory MongoDB binary:", err);
-  process.exit(1);
-});
-```
-
-Then pin the mongod version so the cache key is stable rather than drifting with the package's default, and verify: `rm -rf ~/.cache/mongodb-binaries && npm test` must pass first time. State the before and after wall-clock in your report.
-
-If sharing a single server across files proves impractical under `node --test`'s process-per-file model, warming the binary alone fixes problem 1 - do that much, measure problem 2, and report the number rather than leaving it unmeasured.
-
-- [ ] **Step 5: Run the whole suite**
-
-Run: `npm test`
-Expected: every test file passes. Record the total count in the report.
+Verify it still holds at the end of the branch: run the suite three times and report each result, rather than assuming it stayed fixed while six tasks added tests.
 
 - [ ] **Step 4c: Sweep the remaining em dashes**
 
