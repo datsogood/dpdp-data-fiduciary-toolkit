@@ -139,8 +139,36 @@ stored name, email, phone, dob, pan, or address.** Any `pii` you submit is
 compared against what is already on file (a mismatch is refused with `403`,
 so no payload can redirect the write onto someone else's record) and then
 discarded: the write always uses the *stored* PII, never the request body.
-There is currently no route through which a data principal can correct their
-own contact details - see "What this is not".
+There is no route through which a data principal can correct their own
+contact details directly over HTTP; see "Correcting contact details" below
+for the supported way to do it from your own back end.
+
+### Correcting contact details (Section 12)
+
+`updatePrincipalContact({ models, principalId, pii })` is the supported way
+to honour a Section 12 correction of a data principal's own name, email,
+phone, dob, pan, or address - the field `PUT /consent` above deliberately
+leaves alone.
+
+```js
+const { updatePrincipalContact } = require("dpdp-fiduciary-toolkit");
+
+async function correctContactDetails(models, principalId, pii) {
+  return updatePrincipalContact({ models, principalId, pii });
+}
+```
+
+- It is deliberately **not** mounted on a route. Wiring it up is not a
+  wiring decision, it is a verification decision: changing a stored email
+  rewrites the `emailHash` that signup matches on, so accepting a new
+  address without proving the person controls it points that lookup at an
+  unverified mailbox. This library cannot send mail and owns no session
+  store, so it cannot do that verification - only the host can, with
+  whatever it already uses (an emailed confirmation link, an OTP) before
+  calling this function.
+- It refuses with `409` if the new address already belongs to another
+  principal, so it cannot be used to take over an existing record.
+- It refuses with `409` on an erased principal, because erasure is terminal.
 
 ### Cross-site request forgery
 
@@ -482,19 +510,16 @@ expect.
   even with genuine parental consent. An adopter serving minors must build that
   verification and call `persistPIIwithconsent` with a `parentalConsent` object
   from trusted server-side code. Do not expose that parameter to a form.
-- **No public API for a data principal to correct their own contact
-  details** - the Section 12 right to correction, for the specific case of
-  name/email/phone/dob/pan/address. The service layer has
-  `updatePrincipalContact` for exactly this (it takes identity from a
-  session, never from the payload, so it cannot be used to redirect a write
-  at someone else's record), but it is not wired to any route and is not
-  exported from the package root. `POST /rights/exercise` with `right:
-  "correction"` still works - it *files a request* your back office resolves
-  by hand - but there is no self-service equivalent to how withdrawal or
-  consent capture work. An integrator needing self-service correction today
-  has to call `updatePrincipalContact` directly
-  (`require("dpdp-fiduciary-toolkit/src/utils/principalId")`) and build a
-  route around it themselves.
+- **Contact correction (Section 12) is supported, but not as a route.**
+  `updatePrincipalContact` is exported and does the real work - identity
+  comes from `principalId`, never from the payload, so it cannot be used to
+  redirect a write at someone else's record - but nothing in this package
+  calls it, because the missing piece is verification, not code: the host
+  has to prove the person controls a new email or phone before this function
+  is called, and only the host can do that. See "Correcting contact
+  details" above. `POST /rights/exercise` with `right: "correction"` is the
+  separate, always-available path that just files a request for your back
+  office to resolve by hand.
 - **Withdrawal does not itself stop or erase anything.** What ships is the
   `onWithdrawal` hook - which tells your own code that a withdrawal happened -
   and `erasePrincipalPII`, an erasure primitive you call yourself. Neither one
@@ -520,14 +545,18 @@ expect.
   add it as a path dependency. The `require("dpdp-fiduciary-toolkit")` in the
   examples above is the name it will publish under.
 
-Five items above - no self-service contact correction, withdrawal/erasure not
-reaching your processors, erasure not reaching free text, no rate limiting,
-and the install-from-git failure - are closed **by this documentation, not by
-code**: an integrator who needs any of them should plan to build it, not
-assume it exists. The `escalateToBoard` note earlier in "The APIs" (it
-contacts no one) and the parental-consent limitation above it (no minor can
-register over HTTP at all) are the same kind of gap, recorded the same way.
-For the underlying finding-by-finding audit this branch worked against, see
+Four items above - withdrawal/erasure not reaching your processors, erasure
+not reaching free text, no rate limiting, and the install-from-git failure -
+are closed **by this documentation, not by code**: an integrator who needs
+any of them should plan to build it, not assume it exists. Contact
+correction is a different shape of gap: real code backs it
+(`updatePrincipalContact`, exported), it is just deliberately not a route -
+the same pattern as `erasePrincipalPII` and the fiduciary-side lifecycle
+functions, for the reason given in "Correcting contact details" above. The
+`escalateToBoard` note earlier in "The APIs" (it contacts no one) and the
+parental-consent limitation above it (no minor can register over HTTP at
+all) are the same kind of gap as the first four, recorded the same way. For
+the underlying finding-by-finding audit this branch worked against, see
 [`docs/superpowers/plans/2026-08-07-dpdp-audit-remediation/spec.md`](https://github.com/datsogood/dpdp-data-fiduciary-toolkit/blob/main/docs/superpowers/plans/2026-08-07-dpdp-audit-remediation/spec.md)
 in the repository - it is not reproduced here because a fixed-in-time coverage
 table next to living code drifts the moment either one changes.

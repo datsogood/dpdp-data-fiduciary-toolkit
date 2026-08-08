@@ -10,7 +10,7 @@ const { erasePrincipalPII } = require("./services/erasure");
 const { advanceRightsRequest, advanceGrievance, advanceConsentManagerRequest } = require("./services/requestLifecycle");
 const createRouter = require("./http/router");
 const { buildNotice } = require("./config/notice");
-const { newPrincipalId, findPrincipalByContact } = require("./utils/principalId");
+const { newPrincipalId, findPrincipalByContact, updatePrincipalContact } = require("./utils/principalId");
 const { CONSENT_CATALOG, RIGHTS_CATALOG, FIDUCIARY } = require("./config/catalog");
 
 module.exports = {
@@ -55,6 +55,14 @@ module.exports = {
   // principalId that resolvePrincipal must return - the building block for
   // real sign-in, not just the demo login in examples/server.js.
   findPrincipalByContact,
+  // The supported way to honour a Section 12 correction of a principal's own
+  // contact details. Deliberately NOT mounted on a route: changing a stored
+  // email rewrites the emailHash that signup matches on, so accepting a new
+  // address without proving the person controls it points that lookup at an
+  // unverified mailbox - this library cannot send mail or verify anything,
+  // only the host can. See the README's "Correcting contact details" section
+  // before wiring this into your own route.
+  updatePrincipalContact,
   // Config, exposed for introspection / building your own UI against it.
   CONSENT_CATALOG,
   RIGHTS_CATALOG,
