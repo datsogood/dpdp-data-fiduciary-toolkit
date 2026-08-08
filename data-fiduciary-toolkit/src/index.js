@@ -3,17 +3,20 @@ const { buildModels } = require("./models");
 const persistPIIwithconsent = require("./services/persistPIIwithconsent");
 const withdrawConsent = require("./services/withdrawConsent");
 const { getConsentState } = require("./services/consentState");
-const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = require("./services/dataPrincipalRights");
-const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("./services/complaintToTheBoard");
+const { listRights, exerciseRight, listRightsRequests } = require("./services/dataPrincipalRights");
+const { complaintToTheBoard, escalateToBoard, listGrievances } = require("./services/complaintToTheBoard");
 const consentManagerRequest = require("./services/consentManagerRequest");
+const { erasePrincipalPII } = require("./services/erasure");
 const { advanceRightsRequest, advanceGrievance, advanceConsentManagerRequest } = require("./services/requestLifecycle");
 const createRouter = require("./http/router");
+const { buildNotice } = require("./config/notice");
+const { newPrincipalId } = require("./utils/principalId");
 const { CONSENT_CATALOG, RIGHTS_CATALOG, FIDUCIARY } = require("./config/catalog");
 
 module.exports = {
   connect,
   buildModels,
-  // Framework-agnostic service functions — call these directly if you're
+  // Framework-agnostic service functions - call these directly if you're
   // not using Express, or wrap them in your own transport layer.
   persistPIIwithconsent,
   withdrawConsent,
@@ -22,13 +25,14 @@ module.exports = {
   listRights,
   exerciseRight,
   listRightsRequests,
-  getRightsRequest,
   complaintToTheBoard,
   escalateToBoard,
   listGrievances,
-  getGrievance,
   consentManagerRequest,
   listConsentManagerRequests: consentManagerRequest.listConsentManagerRequests,
+  // Erasure - clears a Principal's PII, leaves the pseudonymous consent
+  // ledger intact. See its own JSDoc for what it does NOT reach.
+  erasePrincipalPII,
   // Fiduciary-side status transitions - deliberately NOT mounted on
   // createRouter's principal-facing routes. A data principal must not be
   // able to close their own grievance, and the fiduciary's staff auth is the
@@ -37,8 +41,12 @@ module.exports = {
   advanceRightsRequest,
   advanceGrievance,
   advanceConsentManagerRequest,
-  // Express router with all five APIs pre-wired.
+  // Express router with every route pre-wired.
   createRouter,
+  // The Section 5 notice generator, and a fresh random identifier - exposed
+  // for a host building its own UI or transport around the services above.
+  buildNotice,
+  newPrincipalId,
   // Config, exposed for introspection / building your own UI against it.
   CONSENT_CATALOG,
   RIGHTS_CATALOG,

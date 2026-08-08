@@ -2,7 +2,7 @@ const { generateDocRef } = require("../utils/principalId");
 const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
 
 /**
- * Raises a request to speak to / be connected with a Consent Manager — a
+ * Raises a request to speak to / be connected with a Consent Manager - a
  * separate, Board-registered entity under Section 6(7)-(9) through which a
  * data principal can manage consent across multiple fiduciaries. This
  * toolkit only logs the request and hands it off; it does not itself act
