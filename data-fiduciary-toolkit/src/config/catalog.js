@@ -133,12 +133,19 @@ const RIGHTS_CATALOG = [
     description: "Ask us to delete the personal data we hold about you. We must comply unless the law requires us to keep it - we will tell you which, and why." },
   { key: "nominate", title: "Right to nominate", section: "Section 14",
     description: "Name someone to exercise these rights on your behalf if you die or become incapacitated." },
+  { key: "withdrawal", title: "Right to withdraw consent", section: "Section 6(4)",
+    description: "Withdraw your consent for any consent-based purpose at any time, as easily as you gave it." },
   { key: "grievance", title: "Right to grievance redressal", section: "Section 13",
     description: "Raise a complaint with our Grievance Officer. If it is not resolved in time, you may complain to the Data Protection Board." },
 ];
 
+// The DPO contact, for a response that tells a data principal who to reach
+// after exercising a right or withdrawing consent (L6).
+const contactBlock = () => ({ dpoName: FIDUCIARY.dpoName, dpoEmail: FIDUCIARY.dpoEmail });
+
 module.exports = {
   FIDUCIARY,
+  contactBlock,
   // Functions - always read the catalog live, so a runtime customisation is
   // reflected immediately rather than needing a process restart (M3).
   getCatalog,

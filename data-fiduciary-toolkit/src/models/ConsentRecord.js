@@ -16,10 +16,27 @@ const consentEventSchema = new Schema(
   { _id: false }
 );
 
+// The Section 5 notice shown at the moment of the most recent submission -
+// the evidence of what the principal was told, not just that they consented.
+// One snapshot per record, overwritten on each submission. This is the
+// spec's choice, made for size - see the Task 8 report for the case that the
+// evidentiary argument runs the other way, since it means an older event's
+// notice is unrecoverable once a later submission overwrites this field.
+const noticeSnapshotSchema = new Schema(
+  {
+    version: { type: String, required: true },
+    language: { type: String, required: true },
+    body: { type: Schema.Types.Mixed },
+    shownAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const consentRecordSchema = new Schema({
   principalId: { type: String, required: true, unique: true, index: true },
   docRef: { type: String, required: true, unique: true },
   events: { type: [consentEventSchema], default: [] },
+  lastNotice: { type: noticeSnapshotSchema, default: undefined },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });

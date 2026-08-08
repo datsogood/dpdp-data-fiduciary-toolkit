@@ -1,4 +1,4 @@
-const { getCatalogEntry, getValidConsentTypes, getWithdrawableTypes } = require("../config/catalog");
+const { getCatalogEntry, getValidConsentTypes, getWithdrawableTypes, contactBlock } = require("../config/catalog");
 const { assertPrincipalId, assertStringArray } = require("../utils/validate");
 const { generateDocRef } = require("../utils/principalId");
 const { AppError } = require("../utils/errors");
@@ -18,7 +18,7 @@ const { AppError } = require("../utils/errors");
  * @param {string}   input.principalId
  * @param {string[]} input.consentTypes   - purposes to withdraw
  * @param {Function} [input.onWithdrawal] - called once, only if something changed
- * @returns {Promise<{ docRef, receiptId, withdrawn, rejected, noChange, effectiveFrom }>}
+ * @returns {Promise<{ docRef, receiptId, withdrawn, rejected, noChange, effectiveFrom, contact: { dpoName, dpoEmail } }>}
  *          effectiveFrom is null when withdrawn is empty.
  */
 async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal } = {}) {
@@ -89,6 +89,7 @@ async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal
     // null when nothing was withdrawn: reporting a moment for a revocation that
     // did not happen would have a host act on nothing.
     effectiveFrom: withdrawn.length ? now : null,
+    contact: contactBlock(),
   };
 }
 

@@ -5,6 +5,7 @@ const { AppError } = require("../utils/errors");
 const { findPrincipalByContact, findPrincipalById, lookupHash } = require("../utils/principalId");
 const persistPIIwithconsent = require("../services/persistPIIwithconsent");
 const withdrawConsent = require("../services/withdrawConsent");
+const { buildNotice, DEFAULT_NOTICE_LANGUAGE } = require("../config/notice");
 const { listRights, exerciseRight } = require("../services/dataPrincipalRights");
 const { complaintToTheBoard, escalateToBoard } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
@@ -155,7 +156,10 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
       if (existing) {
         throw new AppError("principal already exists - sign in to change your consent", 409);
       }
-      const result = await persistPIIwithconsent({ models, pii, consentTypes: readConsentTypes(req.body) });
+      const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
+      const result = await persistPIIwithconsent({
+        models, pii, consentTypes: readConsentTypes(req.body), notice,
+      });
       res.status(201).json(result);
     })
   );
@@ -180,6 +184,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
       }
       assertOwnContact(principal, readPii(req.body));
 
+      const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
       const result = await persistPIIwithconsent({
         models,
         // Identity is passed explicitly. Without it the service re-derives it
@@ -190,6 +195,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
         pii: principal.pii.toObject(),
         consentTypes: readConsentTypes(req.body),
         regrant: isTrue(req.body.regrant),
+        notice,
       });
       res.status(200).json(result);
     })

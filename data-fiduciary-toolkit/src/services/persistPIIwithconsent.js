@@ -155,10 +155,14 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     return { events, refused };
   };
 
-  // Task 8 replaces this with the full notice snapshot. Keep it in one place so
-  // both the first attempt and the recovery below apply the same thing.
+  // The full notice body is kept, not just its version, so a dispute can show
+  // exactly what the principal was told rather than a hash they must take on
+  // trust. Kept in one place so both the first attempt and the recovery below
+  // apply the same snapshot.
   const snapshotNotice = (doc) => {
-    if (notice) doc.lastNotice = notice;
+    if (notice) {
+      doc.lastNotice = { version: notice.version, language: notice.language, body: notice, shownAt: now };
+    }
   };
 
   // The unique index on principalId is the only thing stopping two concurrent

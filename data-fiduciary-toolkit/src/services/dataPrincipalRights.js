@@ -1,4 +1,4 @@
-const { RIGHTS_CATALOG } = require("../config/catalog");
+const { RIGHTS_CATALOG, contactBlock } = require("../config/catalog");
 const { generateDocRef } = require("../utils/principalId");
 const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
@@ -19,7 +19,7 @@ function listRights() {
  * @param {string} input.principalId
  * @param {string} input.right - one of RIGHTS_CATALOG keys, excluding 'grievance'
  * @param {string} [input.details] - e.g. what field to correct, for 'correction'
- * @returns {Promise<{ refId: string, right: string, status: string }>}
+ * @returns {Promise<{ refId: string, right: string, status: string, contact: { dpoName, dpoEmail } }>}
  */
 async function exerciseRight({ models, principalId, right, details = "" } = {}) {
   // A plain Error has no .status and name === "Error", so the router's error
@@ -47,7 +47,7 @@ async function exerciseRight({ models, principalId, right, details = "" } = {}) 
     status: "received",
   });
 
-  return { refId: request.refId, right, status: request.status };
+  return { refId: request.refId, right, status: request.status, contact: contactBlock() };
 }
 
 module.exports = { listRights, exerciseRight };
