@@ -11,6 +11,7 @@ const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
 const withdrawConsent = require("../src/services/withdrawConsent");
 const { erasePrincipalPII } = require("../src/services/erasure");
 const { getConsentState } = require("../src/services/consentState");
+const { buildNotice } = require("../src/config/notice");
 
 const PII = { name: "Asha", email: "asha@example.com", phone: "9876543210", dob: "1990-04-01" };
 
@@ -25,6 +26,21 @@ test("a principal's full consent history can be read back", async () => {
     assert.equal(view.ledger.length, view.ledger.filter(Boolean).length);
     assert.ok(view.ledger.length >= 2, "the ledger must expose grant and withdrawal, not just current state");
     assert.ok(view.ledger.every((e) => e.timestamp && e.receiptId));
+  });
+});
+
+test("the ledger surfaces noticeVersion per event, not just on currentState()'s latest one", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const notice = buildNotice({ language: "en" });
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"], notice });
+
+    const view = await getConsentState({ models, principalId });
+    const grant = view.ledger.find((e) => e.type === "marketing" && e.status === "granted");
+    assert.equal(
+      grant.noticeVersion, notice.version,
+      "the full ledger must expose the same noticeVersion that currentState()'s raw event subdocuments already do"
+    );
   });
 });
 
@@ -62,6 +78,29 @@ test("GET /consent returns the ledger to the authenticated owner only", async ()
       acting = "f".repeat(64);
       const theirs = await get("/consent");
       assert.equal(theirs.status, 404, "a different principal must not read this ledger");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+test("GET /consent carries Cache-Control: no-store and Vary: Cookie - PII must never be cached", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    const app = express();
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => principalId }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      const res = await fetch(`http://localhost:${port}/dpdp/consent`, { headers: { Accept: "application/json" } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("cache-control"), "no-store",
+        "a shared cache or CDN must never be told it may store this response");
+      assert.equal(res.headers.get("vary"), "Cookie",
+        "the URL carries no identifying component - only the session cookie distinguishes one principal's " +
+          "response from another's");
     } finally {
       await new Promise((r) => server.close(r));
     }
@@ -247,6 +286,24 @@ test("a principalId in the query string is ignored on a read route - identity co
       assert.equal(body.state.marketing.status, "granted", "this must be A's own ledger, not B's");
     } finally {
       await asA.close();
+    }
+  });
+});
+
+test("GET /rights/requests/:refId and GET /grievances/:refId are 404 for a syntactically valid refId that never existed", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: [] });
+
+    const asPrincipal = await bootApp(conn, principalId);
+    try {
+      const rights = await asPrincipal.call("GET", "/rights/requests/RQ-0000000000000000");
+      assert.equal(rights.status, 404, "a well-formed but unknown refId must 404, same as a stranger's real one");
+
+      const grievances = await asPrincipal.call("GET", "/grievances/GR-0000000000000000");
+      assert.equal(grievances.status, 404, "a well-formed but unknown refId must 404, same as a stranger's real one");
+    } finally {
+      await asPrincipal.close();
     }
   });
 });

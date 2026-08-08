@@ -64,11 +64,13 @@ async function exerciseRight({ models, principalId, right, details = "" } = {}) 
 /**
  * Every rights request filed by one principal, most recent first. Scoped by
  * construction - the query filters on principalId, so this can never return
- * another principal's requests.
+ * another principal's requests. Capped at 200 rows - this is a per-principal
+ * list, not a report, and an unbounded query would let one principal with an
+ * unusually large history make a read arbitrarily expensive.
  */
 async function listRightsRequests({ models, principalId }) {
   assertPrincipalId(principalId);
-  const rows = await models.RightsRequest.find({ principalId }).sort({ createdAt: -1 }).lean();
+  const rows = await models.RightsRequest.find({ principalId }).sort({ createdAt: -1 }).limit(200).lean();
   return rows.map(({ refId, right, details, status, createdAt, updatedAt }) => ({ refId, right, details, status, createdAt, updatedAt }));
 }
 

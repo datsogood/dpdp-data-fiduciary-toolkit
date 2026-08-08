@@ -11,6 +11,7 @@ const consentManagerRequestSchema = new Schema({
   preferredConsentManager: { type: String, default: "", maxlength: 200 }, // optional, if the principal names one
   status: { type: String, enum: ["received", "connected", "closed"], default: "received" },
   createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
 });
 
 module.exports = {

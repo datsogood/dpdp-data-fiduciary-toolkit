@@ -29,6 +29,12 @@ async function getConsentState({ models, principalId }) {
     ledger: record.events.map((e) => ({
       type: e.type, status: e.status, basis: e.basis,
       lawfulBasisKind: e.lawfulBasisKind, receiptId: e.receiptId, timestamp: e.timestamp,
+      // The notice in force when THIS event was written - see notice below,
+      // which is only a pointer to the most recent one. Without this, the
+      // full ledger would hide exactly the field that lets a past event's
+      // notice be resolved, while currentState() (raw event subdocuments)
+      // exposes it - the wrong way round for an audit trail.
+      noticeVersion: e.noticeVersion,
     })),
     notice: record.lastNotice ? { version: record.lastNotice.version, language: record.lastNotice.language, shownAt: record.lastNotice.shownAt } : null,
     pii: principal && !principal.erasedAt ? principal.pii : null,

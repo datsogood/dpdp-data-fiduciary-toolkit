@@ -52,11 +52,14 @@ async function complaintToTheBoard({ models, principalId, subject, description }
 
 /**
  * Escalates an existing grievance to the Data Protection Board. Only
- * meaningful once the SLA has lapsed without resolution — enforced here
+ * meaningful once the SLA has lapsed without resolution - enforced here
  * rather than left to the caller.
  *
- * principalId is required and is compared against the grievance's owner. The
- * router takes it from resolvePrincipal, never from the request.
+ * principalId is required and is folded into the lookup itself, not checked
+ * afterwards - see getGrievance below for why a 403 here would turn this
+ * endpoint into an existence oracle for other principals' GR- references.
+ * The router takes principalId from resolvePrincipal, never from the
+ * request.
  */
 async function escalateToBoard({ models, refId, principalId } = {}) {
   assertNonEmptyString(refId, "refId", 64);
@@ -65,13 +68,14 @@ async function escalateToBoard({ models, refId, principalId } = {}) {
   // reference could escalate someone else's complaint (M8).
   assertPrincipalId(principalId);
 
-  const grievance = await models.Grievance.findOne({ refId });
+  // principalId is part of the filter itself, not checked after the fact -
+  // a refId belonging to another principal simply does not match and comes
+  // back as the same 404 as a refId that does not exist at all. A 403 here
+  // would confirm the refId is real, letting anyone who has seen or guessed
+  // a GR- reference distinguish "exists, not yours" from "does not exist" -
+  // exactly the existence oracle getGrievance was written to avoid.
+  const grievance = await models.Grievance.findOne({ refId, principalId });
   if (!grievance) throw new AppError("No grievance found with that reference", 404);
-  // Ownership is checked before state, so the SLA and resolution messages
-  // below cannot be used to read the status of a grievance that is not yours.
-  if (grievance.principalId !== principalId) {
-    throw new AppError("This grievance does not belong to you", 403);
-  }
   if (grievance.status === "resolved") throw new AppError("This grievance is already marked resolved", 409);
   if (new Date() < grievance.slaDueAt) {
     throw new AppError(
@@ -92,11 +96,14 @@ async function escalateToBoard({ models, refId, principalId } = {}) {
 /**
  * Every grievance filed by one principal, most recent first. Scoped by
  * construction - the query filters on principalId, so this can never return
- * another principal's grievances.
+ * another principal's grievances. Capped at 200 rows - this is a
+ * per-principal list, not a report, and an unbounded query would let one
+ * principal with an unusually large history make a read arbitrarily
+ * expensive.
  */
 async function listGrievances({ models, principalId }) {
   assertPrincipalId(principalId);
-  const rows = await models.Grievance.find({ principalId }).sort({ createdAt: -1 }).lean();
+  const rows = await models.Grievance.find({ principalId }).sort({ createdAt: -1 }).limit(200).lean();
   return rows.map(
     ({ refId, subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt }) => ({
       refId, subject, description, addressedTo, status, slaDueAt, escalatedToBoard, escalatedAt, createdAt, updatedAt,

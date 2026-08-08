@@ -439,7 +439,10 @@ test("escalateToBoard refuses a refId belonging to another principal", async () 
     const { call, close } = await app(conn, { resolvePrincipal: () => other });
     try {
       const res = await call("POST", "/grievance/GR-OWNED/escalate", {});
-      assert.equal(res.status, 403, "a different principal must not escalate someone else's grievance");
+      // 404, not 403: a 403 would confirm the refId is real, turning this
+      // route into an existence oracle for other principals' GR- references
+      // - the same property GET /grievances/:refId is held to.
+      assert.equal(res.status, 404, "a different principal must not learn this grievance exists");
       const still = await models.Grievance.findOne({ refId: "GR-OWNED" });
       assert.equal(still.status, "open", "the grievance must not be mutated");
       assert.equal(still.escalatedToBoard, false);

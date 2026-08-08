@@ -38,13 +38,16 @@ async function consentManagerRequest({ models, principalId, message, preferredCo
 /**
  * Every consent-manager request filed by one principal, most recent first.
  * Scoped by construction - the query filters on principalId, so this can
- * never return another principal's requests.
+ * never return another principal's requests. Capped at 200 rows - this is a
+ * per-principal list, not a report, and an unbounded query would let one
+ * principal with an unusually large history make a read arbitrarily
+ * expensive.
  */
 async function listConsentManagerRequests({ models, principalId }) {
   assertPrincipalId(principalId);
-  const rows = await models.ConsentManagerRequest.find({ principalId }).sort({ createdAt: -1 }).lean();
-  return rows.map(({ refId, message, preferredConsentManager, status, createdAt }) => ({
-    refId, message, preferredConsentManager, status, createdAt,
+  const rows = await models.ConsentManagerRequest.find({ principalId }).sort({ createdAt: -1 }).limit(200).lean();
+  return rows.map(({ refId, message, preferredConsentManager, status, createdAt, updatedAt }) => ({
+    refId, message, preferredConsentManager, status, createdAt, updatedAt,
   }));
 }
 

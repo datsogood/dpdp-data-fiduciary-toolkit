@@ -115,6 +115,22 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   }
 
   /**
+   * These six routes are the first cacheable responses in the toolkit that
+   * carry personal data - every pre-existing PII route is POST or PUT, and
+   * neither is cacheable by default. GET /consent in particular returns
+   * name, email, phone, dob, PAN and address on a URL with no
+   * user-identifying component, distinguished only by the host's session
+   * cookie: a shared cache or CDN in front of the host, or a browser's disk
+   * or back-forward cache on a shared machine, could otherwise serve one
+   * principal's response to the next.
+   */
+  function noStore(req, res, next) {
+    res.set("Cache-Control", "no-store");
+    res.set("Vary", "Cookie");
+    next();
+  }
+
+  /**
    * Refuses contact details that are not the signed-in principal's own.
    *
    * persistPIIwithconsent resolves a principal through findOrCreatePrincipal,
@@ -232,6 +248,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   router.get(
     "/consent",
     requireAuth,
+    noStore,
     wrap(async (req, res) => {
       const result = await getConsentState({ models, principalId: req.principalId });
       res.status(200).json(result);
@@ -270,6 +287,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   router.get(
     "/rights/requests",
     requireAuth,
+    noStore,
     wrap(async (req, res) => {
       res.status(200).json(await listRightsRequests({ models, principalId: req.principalId }));
     })
@@ -278,6 +296,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   router.get(
     "/rights/requests/:refId",
     requireAuth,
+    noStore,
     wrap(async (req, res) => {
       res.status(200).json(await getRightsRequest({ models, principalId: req.principalId, refId: req.params.refId }));
     })
@@ -340,6 +359,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   router.get(
     "/grievances",
     requireAuth,
+    noStore,
     wrap(async (req, res) => {
       res.status(200).json(await listGrievances({ models, principalId: req.principalId }));
     })
@@ -348,6 +368,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   router.get(
     "/grievances/:refId",
     requireAuth,
+    noStore,
     wrap(async (req, res) => {
       res.status(200).json(await getGrievance({ models, principalId: req.principalId, refId: req.params.refId }));
     })
@@ -382,6 +403,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled } =
   router.get(
     "/consent-manager/requests",
     requireAuth,
+    noStore,
     wrap(async (req, res) => {
       res.status(200).json(await listConsentManagerRequests({ models, principalId: req.principalId }));
     })
