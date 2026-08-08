@@ -9,6 +9,7 @@ const FIDUCIARY = {
   dpoName: process.env.FIDUCIARY_DPO_NAME || "Data Protection Officer",
   dpoEmail: process.env.FIDUCIARY_DPO_EMAIL || "dpo@example.com",
   grievanceSlaDays: Number(process.env.GRIEVANCE_SLA_DAYS || 7),
+  rightsSlaDays: Number(process.env.RIGHTS_SLA_DAYS || 30),
 };
 
 // ---------------------------------------------------------------------------

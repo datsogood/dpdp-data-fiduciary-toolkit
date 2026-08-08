@@ -8,6 +8,7 @@ const grievanceSchema = new Schema({
   addressedTo: { type: String, required: true }, // the fiduciary's Grievance Officer, per Section 13
   status: { type: String, enum: ["open", "in_progress", "resolved", "escalated"], default: "open" },
   slaDueAt: { type: Date, required: true },
+  resolution: { type: String, default: "", maxlength: 5000 },
   escalatedToBoard: { type: Boolean, default: false },
   escalatedAt: Date,
   createdAt: { type: Date, default: Date.now },

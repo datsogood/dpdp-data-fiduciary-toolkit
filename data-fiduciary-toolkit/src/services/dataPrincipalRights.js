@@ -1,4 +1,4 @@
-const { RIGHTS_CATALOG, contactBlock } = require("../config/catalog");
+const { RIGHTS_CATALOG, contactBlock, FIDUCIARY } = require("../config/catalog");
 const { generateDocRef } = require("../utils/principalId");
 const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
@@ -50,12 +50,15 @@ async function exerciseRight({ models, principalId, right, details = "" } = {}) 
     );
   }
 
+  const slaDueAt = new Date(Date.now() + FIDUCIARY.rightsSlaDays * 24 * 60 * 60 * 1000);
+
   const request = await models.RightsRequest.create({
     principalId,
     refId: generateDocRef("RQ"),
     right,
     details,
     status: "received",
+    slaDueAt,
   });
 
   return { refId: request.refId, right, status: request.status, contact: contactBlock() };

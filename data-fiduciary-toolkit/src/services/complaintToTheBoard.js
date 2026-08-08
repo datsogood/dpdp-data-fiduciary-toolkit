@@ -77,6 +77,14 @@ async function escalateToBoard({ models, refId, principalId } = {}) {
   const grievance = await models.Grievance.findOne({ refId, principalId });
   if (!grievance) throw new AppError("No grievance found with that reference", 404);
   if (grievance.status === "resolved") throw new AppError("This grievance is already marked resolved", 409);
+  // Null-safe: a document could reach "escalated" by a route this plan does
+  // not control (a direct database edit, or a future caller), so escalatedAt
+  // is not guaranteed to be set even though escalateToBoard itself always
+  // sets it before status.
+  if (grievance.status === "escalated") {
+    const when = grievance.escalatedAt ? grievance.escalatedAt.toISOString() : "earlier";
+    throw new AppError(`This grievance was already escalated on ${when}`, 409);
+  }
   if (new Date() < grievance.slaDueAt) {
     throw new AppError(
       `The Grievance Officer's SLA hasn't lapsed yet (due ${grievance.slaDueAt.toISOString()})`,

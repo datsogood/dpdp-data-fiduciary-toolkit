@@ -6,6 +6,7 @@ const { getConsentState } = require("./services/consentState");
 const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = require("./services/dataPrincipalRights");
 const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("./services/complaintToTheBoard");
 const consentManagerRequest = require("./services/consentManagerRequest");
+const { advanceRightsRequest, advanceGrievance, advanceConsentManagerRequest } = require("./services/requestLifecycle");
 const createRouter = require("./http/router");
 const { CONSENT_CATALOG, RIGHTS_CATALOG, FIDUCIARY } = require("./config/catalog");
 
@@ -28,6 +29,14 @@ module.exports = {
   getGrievance,
   consentManagerRequest,
   listConsentManagerRequests: consentManagerRequest.listConsentManagerRequests,
+  // Fiduciary-side status transitions - deliberately NOT mounted on
+  // createRouter's principal-facing routes. A data principal must not be
+  // able to close their own grievance, and the fiduciary's staff auth is the
+  // host's concern, not this library's. Wire these into your own back-office
+  // surface.
+  advanceRightsRequest,
+  advanceGrievance,
+  advanceConsentManagerRequest,
   // Express router with all five APIs pre-wired.
   createRouter,
   // Config, exposed for introspection / building your own UI against it.
