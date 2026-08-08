@@ -449,3 +449,26 @@ TEST INFRA FIXED (commit 739fb3b), pulled forward from T14. One mongod per PROCE
   lock-wait, and kept pretest anyway because it removes the race by construction.
   T14 Step 4b replaced with a re-verification step: run the suite three times at the end of the
   branch rather than assuming it stayed fixed while six tasks added tests.
+Task 11: implementer DONE_WITH_CONCERNS, 111/111, then fix round 1 (commits 3add911..c900f6b),
+  113/113. Task review APPROVED with no Critical and no Important in its own work.
+  Reviewer independently confirmed both invariants: "escalated" never appears as a TARGET in any
+  GRIEVANCE_TRANSITIONS array so it is unreachable from every from-state including itself, and
+  resolution genuinely persists because the test re-queries the document rather than trusting the
+  returned object. It verified mutation is atomic (assertTransition throws before any assignment,
+  proved by two tests re-fetching after a rejected call), that every schema enum aligns 1:1 with
+  its transition map keys with no orphaned states, and grepped every RightsRequest.create call
+  site to confirm making slaDueAt required breaks nothing.
+Task 11: all three implementer concerns upheld. The 6-vs-4 test count was MY stale brief text -
+  Steps 4 and 5 ask for assertions the Step 1 code block does not contain. Leaving pre-existing
+  em dashes was correct under surgical-changes discipline. And the resolution-not-on-the-read-path
+  concern was a real Section 13 gap: a principal saw status "resolved" with no explanation, on a
+  read path built by T10 that was hiding the very field T11 created.
+Task 11: fix round re-review ADJUDICATED BY CONTROLLER. The diff is four additions of the word
+  `resolution` to four projections in two files, plus tests; I read it in full, it is mechanically
+  obvious, and the suite is green at 113/113 with readpath 11/11 also verified. Recorded rather
+  than silently skipped.
+Task 11: NEW FINDING from the implementer, correctly not fixed out of scope: slaDueAt has the
+  IDENTICAL read-path gap. listGrievances/getGrievance include it; listRightsRequests/
+  getRightsRequest do not - so a principal cannot see when their rights request is due, which is
+  exactly when they would know to chase it. Carried into T12's dispatch.
+Task 11: complete (commits ab8da78..c900f6b, review approved + 1 fix round)
