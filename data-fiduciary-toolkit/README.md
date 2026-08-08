@@ -45,6 +45,14 @@ A 0.1.0 integration will not boot against 0.2.0 without changes:
   booted on 0.1.0 and served it to data principals on the grievance page.
 - A non-positive-integer `GRIEVANCE_SLA_DAYS` or `RIGHTS_SLA_DAYS` now refuses
   to boot rather than becoming `NaN` at runtime.
+- An unset, blank, or shorter-than-32-character `PRINCIPAL_ID_SECRET` now
+  refuses to boot. `.env.example` ships it empty, so a deployment that copied
+  that file and did not fill it in previously started, passed health checks,
+  rendered `GET /consent/new`, and then failed the **first** `POST /consent`
+  with a `500`. It is now checked at startup like the DPO address.
+- A `NOTICE_LANGUAGES` entry other than `en` now refuses to boot. Only English
+  ships - see "The Section 5 notice" below for why naming another language
+  produced false evidence rather than a translation.
 - `principalId` is no longer derivable from an email, so 0.1.0 identifiers
   cannot be carried over - see "Migrating from 0.1.0" below.
 - `ConsentRecord.lastNotice` changed shape - see "Migrating from 0.1.0" below.
@@ -126,9 +134,32 @@ deployment fails closed, not open.
 Building that session lookup usually starts from a contact detail you have
 just verified (an emailed one-time link, an OTP) - `findPrincipalByContact({
 models, email, phone })` is exported for exactly that: it turns a verified
-email or phone into the `principalId` your session should carry.
+contact detail into the `principalId` your session should carry.
 `examples/server.js`'s demo login uses it; a real deployment's own sign-in
 would too.
+
+**A phone number is not an identity.** This toolkit's stated audience shares
+one handset across a household, so `phoneHash` is deliberately non-unique and
+one number can belong to several data principals. Verifying that someone
+controls a handset is not the same as verifying *which household member* is
+holding it, and only your own application can close that gap. So:
+
+- `findPrincipalByContact` refuses (`409`) a phone number that matches more
+  than one principal, rather than returning an arbitrary one. Returning a
+  guess would issue a daughter completing an OTP a session for her *mother* -
+  her PII, her consent ledger, and the ability to append irreversible
+  withdrawals to it.
+- Signup matches on `emailHash` and nothing else. A registration with no email
+  **always creates a new principal**, so two household members who both lack
+  an email can both register. Matching on the shared number instead meant the
+  second person was refused with `409` and could never register at all.
+
+The residual cost is honest and deliberate: a phone-only data principal who
+resubmits the form gets a **second record**, because nothing on file
+distinguishes "the same woman again" from "her sister". Your application has
+to disambiguate them - it holds the real-world knowledge that can. That is
+recoverable; a permanently unregistrable beneficiary is not, and an account
+takeover is worse than either.
 
 `POST /consent` is the one deliberate exception: it is how a `principalId`
 comes to exist at all, so it does not require a session. It does, however,
@@ -402,9 +433,27 @@ async function eraseOnRequest(models, principalId) {
 }
 ```
 
-It clears the `Principal` document's PII and lookup hashes - irreversible,
-and the person can no longer be re-identified by email or phone through this
-system. It does **not** touch the `ConsentRecord` ledger, which is retained,
+It clears, irreversibly:
+
+- the `Principal` document's `pii` - name, email, phone, dob, PAN, address;
+- both lookup hashes, so the person can no longer be re-identified by email or
+  phone through this system;
+- the **guardian's** contact details on a child's record
+  (`parentalConsent.name`, `.email`, `.relationship`). These matter as much as
+  the rest: the child's own email is stored as a keyed HMAC, the parent's was
+  stored in plaintext, so leaving it behind erased the child and kept the
+  parent - on a document stamped `erasedAt`, which `getConsentState` reports
+  as `pii: null`.
+
+Two fields survive **by decision**, and neither names anybody:
+`parentalConsent.verifiedAt` and `isMinor`. One is a fact about your own
+verification process rather than personal data about the guardian; the other
+is a bare boolean on a now-pseudonymous record. Together they are what keeps
+the retained ledger legible - a child's ledger carries no marketing or
+analytics events because Section 9 prohibits them, and without `isMinor` that
+absence is indistinguishable from an adult who simply declined.
+
+It does **not** touch the `ConsentRecord` ledger, which is retained,
 pseudonymously, as the fiduciary's own evidence that it had a lawful basis
 for the processing it already did. See "What this is not" for what else it
 does not reach.
@@ -440,11 +489,23 @@ live catalog, so it cannot drift from what the code actually processes.
 `POST /consent` and `PUT /consent` store it: the body is deduplicated into
 the `NoticeVersion` collection, content-addressed by a hash of its own
 contents, and every consent event records which version was in force when it
-was written. Only `en` ships with this toolkit; add a language by setting
-`NOTICE_LANGUAGES` and supplying your own translated catalog strings -
-Section 5(3) permits English or any language in the Eighth Schedule to the
-Constitution. Rule 3(c)(i) of the DPDP Rules, 2025 is the source for
-withdrawal needing to be as easy as granting, which the notice also states.
+was written.
+
+**Only English ships, and `NOTICE_LANGUAGES` is not a way to add another
+one.** There is no translation map in this package: every notice string comes
+from a single English catalog, while `buildNotice` validates the requested
+language and stamps it onto the body. So configuring `NOTICE_LANGUAGES=en,hi`
+and requesting `?lang=hi` produced an **English notice labelled `hi`**, stored
+under its own content hash and cited by every consent event written under it -
+affirmative false evidence of Section 5(3) compliance, on a ledger that is
+append-only. `assertConfigured` therefore refuses to boot with any entry other
+than `en`.
+
+Section 5(3) does permit English or any language in the Eighth Schedule to the
+Constitution, and serving one is real work an adopter has to do - a translated
+catalog, reviewed by someone who reads the language - not a setting to flip.
+Rule 3(c)(i) of the DPDP Rules, 2025 is the source for withdrawal needing to be
+as easy as granting, which the notice also states.
 
 ## Data model
 
