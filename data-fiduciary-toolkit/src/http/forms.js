@@ -1,4 +1,4 @@
-const { RIGHTS_CATALOG, FIDUCIARY } = require("../config/catalog");
+const { RIGHTS_CATALOG, FIDUCIARY, getCatalogEntry } = require("../config/catalog");
 
 /**
  * Escapes a value for interpolation into HTML text or a double-quoted
@@ -56,8 +56,6 @@ function renderRightsPage({ basePath = "" } = {}) {
       <p style="font-size:0.85rem;">${escapeHtml(r.description)}</p>
       <form method="POST" action="${action}">
         <input type="hidden" name="right" value="${escapeHtml(r.key)}" />
-        <label>Principal ID</label>
-        <input name="principalId" placeholder="Returned when you confirmed your consent" required />
         <label>Details (optional)</label>
         <textarea name="details" rows="2" placeholder="e.g. which field to correct"></textarea>
         <button type="submit">Request this</button>
@@ -79,8 +77,6 @@ function renderGrievanceForm({ basePath = "" } = {}) {
     <h1>Raise a grievance</h1>
     <p class="lede">Addressed to ${escapeHtml(FIDUCIARY.dpoName)} (${escapeHtml(FIDUCIARY.dpoEmail)}). If unresolved within the SLA, this can be escalated to the Data Protection Board.</p>
     <form method="POST" action="${escapeHtml(`${basePath}/grievance`)}">
-      <label>Principal ID</label>
-      <input name="principalId" required />
       <label>Subject</label>
       <input name="subject" required />
       <label>Description</label>
@@ -96,8 +92,6 @@ function renderConsentManagerForm({ basePath = "" } = {}) {
     <h1>Talk to a Consent Manager</h1>
     <p class="lede">A Consent Manager is an independent, Board-registered entity that can manage your consent across services on your behalf.</p>
     <form method="POST" action="${escapeHtml(`${basePath}/consent-manager`)}">
-      <label>Principal ID</label>
-      <input name="principalId" required />
       <label>Preferred Consent Manager (optional)</label>
       <input name="preferredConsentManager" />
       <label>What do you need help with?</label>
@@ -107,4 +101,141 @@ function renderConsentManagerForm({ basePath = "" } = {}) {
   </body></html>`;
 }
 
-module.exports = { escapeHtml, renderRightsPage, renderGrievanceForm, renderConsentManagerForm };
+/**
+ * GET page: notice and consent capture - the entry point that gives a
+ * browser user their principalId at all, via the receipt page after
+ * submitting. Section 5 requires the itemised notice to accompany or precede
+ * the request for consent. A purpose whose lawful basis is a Section 7
+ * legitimate use is not a choice the data principal gets to make, so it is
+ * stated here, never rendered as a checkbox - only consent-based purposes are.
+ */
+function renderConsentPage({ basePath = "", notice } = {}) {
+  const action = escapeHtml(`${basePath}/consent`);
+  const consentPurposes = notice.purposes.filter((p) => p.lawfulBasis.kind === "consent");
+  const statedPurposes = notice.purposes.filter((p) => p.lawfulBasis.kind !== "consent");
+
+  const stated = statedPurposes
+    .map(
+      (p) => `
+    <div class="card">
+      <div class="right-title">${escapeHtml(p.title)}</div>
+      <div class="right-meta">${escapeHtml(p.lawfulBasis.clause)}</div>
+      <p style="font-size:0.85rem;">${escapeHtml(p.purpose)} ${escapeHtml(p.lawfulBasis.description)}.</p>
+    </div>`
+    )
+    .join("");
+
+  const checkboxes = consentPurposes
+    .map(
+      (p) => `
+    <div class="card">
+      <div class="right-title">${escapeHtml(p.title)}</div>
+      <p style="font-size:0.85rem;">${escapeHtml(p.purpose)}</p>
+      <label style="font-weight:400;">
+        <input type="checkbox" name="consentTypes" value="${escapeHtml(p.type)}" style="width:auto;display:inline-block;margin-right:0.4rem;vertical-align:middle;" />
+        I consent to this
+      </label>
+    </div>`
+    )
+    .join("");
+
+  return `<!doctype html><html><head><style>${baseStyle}</style></head><body>
+    <h1>Notice and consent - ${escapeHtml(notice.fiduciary.name)}</h1>
+    <p class="lede">Digital Personal Data Protection Act, 2023, Section 5. This is what we collect, why, and on what basis.</p>
+    <h2 style="font-size:1rem;">We already have a lawful basis for these - they are not a choice</h2>
+    ${stated}
+    <form method="POST" action="${action}">
+      <input type="hidden" name="consentSubmitted" value="1" />
+      <label>Full name</label>
+      <input name="name" required />
+      <label>Email</label>
+      <input name="email" type="email" />
+      <label>Mobile number</label>
+      <input name="phone" />
+      <label>Date of birth</label>
+      <input name="dob" type="date" required />
+      <h2 style="font-size:1rem;">Choose what you consent to</h2>
+      ${checkboxes}
+      <p style="font-size:0.75rem;">${escapeHtml(notice.withdrawal.description)}</p>
+      <button type="submit">Submit</button>
+    </form>
+  </body></html>`;
+}
+
+/**
+ * The receipt shown right after POST /consent succeeds - the only place a
+ * browser user's principalId is ever shown, because there is no other page
+ * that could hand it to them. Not a secret: the three other forms rely on
+ * the host's own session (via requireAuth), not on this value, so showing it
+ * in plain text is showing a reference number, not a credential.
+ */
+function renderConsentReceipt({ basePath = "", result } = {}) {
+  const { principalId, receiptId } = result;
+  const rightsUrl = escapeHtml(`${basePath}/rights`);
+  const withdrawUrl = escapeHtml(`${basePath}/consent/withdraw`);
+  return `<!doctype html><html><head><style>${baseStyle}</style></head><body>
+    <h1>Consent recorded</h1>
+    <p class="lede">Save this Principal ID somewhere safe - it is not a password, but outside of a signed-in session it is the only way to identify yourself to us.</p>
+    <div class="card">
+      <label>Principal ID</label>
+      <input value="${escapeHtml(principalId)}" readonly />
+      <label>Receipt</label>
+      <input value="${escapeHtml(receiptId)}" readonly />
+    </div>
+    <p><a href="${rightsUrl}">See your rights</a> &middot; <a href="${withdrawUrl}">Withdraw consent</a></p>
+  </body></html>`;
+}
+
+/**
+ * GET page: withdrawal, given the same prominence as consenting - Rule
+ * 3(c)(i) requires withdrawal to be as easy as giving consent. Only
+ * currently-granted, withdrawable purposes are offered: a purpose resting on
+ * a Section 7 legitimate use is never a choice, so it is never listed here
+ * either, the same restriction renderConsentPage applies on the way in.
+ */
+function renderWithdrawalPage({ basePath = "", state = {} } = {}) {
+  const action = escapeHtml(`${basePath}/consent/withdraw`);
+  const withdrawable = Object.entries(state)
+    .filter(([, event]) => event.status === "granted")
+    .map(([type]) => getCatalogEntry(type))
+    .filter((entry) => entry && entry.withdrawable);
+
+  const checkboxes = withdrawable
+    .map(
+      (entry) => `
+    <div class="card">
+      <div class="right-title">${escapeHtml(entry.title)}</div>
+      <p style="font-size:0.85rem;">${escapeHtml(entry.purpose)}</p>
+      <label style="font-weight:400;">
+        <input type="checkbox" name="consentTypes" value="${escapeHtml(entry.type)}" style="width:auto;display:inline-block;margin-right:0.4rem;vertical-align:middle;" />
+        Withdraw this
+      </label>
+    </div>`
+    )
+    .join("");
+
+  const empty = withdrawable.length
+    ? ""
+    : `<p class="lede">You have no active, withdrawable consent to change right now.</p>`;
+
+  return `<!doctype html><html><head><style>${baseStyle}</style></head><body>
+    <h1>Withdraw consent</h1>
+    <p class="lede">As easy as giving it. Tick what you want to withdraw and submit.</p>
+    ${empty}
+    <form method="POST" action="${action}">
+      <input type="hidden" name="consentSubmitted" value="1" />
+      ${checkboxes}
+      <button type="submit">Withdraw selected</button>
+    </form>
+  </body></html>`;
+}
+
+module.exports = {
+  escapeHtml,
+  renderRightsPage,
+  renderGrievanceForm,
+  renderConsentManagerForm,
+  renderConsentPage,
+  renderConsentReceipt,
+  renderWithdrawalPage,
+};

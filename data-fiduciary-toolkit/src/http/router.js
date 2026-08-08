@@ -12,7 +12,15 @@ const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = requ
 const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
 const { listConsentManagerRequests } = consentManagerRequest;
-const { escapeHtml, renderRightsPage, renderGrievanceForm, renderConsentManagerForm } = require("./forms");
+const {
+  escapeHtml,
+  renderRightsPage,
+  renderGrievanceForm,
+  renderConsentManagerForm,
+  renderConsentPage,
+  renderConsentReceipt,
+  renderWithdrawalPage,
+} = require("./forms");
 const { wantsHtml } = require("./negotiate");
 
 /**
@@ -252,6 +260,18 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   // ---------------------------------------------------------------------------
 
   /**
+   * Public: the notice and consent capture page. This is the ONLY page in the
+   * toolkit that does not require a principalId to reach, because giving
+   * consent for the first time is how a principalId comes to exist at all -
+   * every other rendered form now gets identity from the session instead of
+   * asking for it.
+   */
+  router.get("/consent/new", (req, res) => {
+    const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
+    res.type("html").send(renderConsentPage({ basePath: req.baseUrl, notice }));
+  });
+
+  /**
    * SIGNUP ONLY, and deliberately unauthenticated - a person has no account
    * until this succeeds, so requiring one would make the toolkit unusable.
    *
@@ -273,6 +293,12 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       const result = await persistPIIwithconsent({
         models, pii, consentTypes: readConsentTypes(req.body), notice,
       });
+      // The receipt page is how a browser user obtains their principalId at
+      // all - it is otherwise only ever returned in a JSON body, which is
+      // unusable to someone without API access.
+      if (wantsHtml(req)) {
+        return res.status(201).type("html").send(renderConsentReceipt({ basePath: req.baseUrl, result }));
+      }
       res.status(201).json(result);
     })
   );
@@ -333,6 +359,22 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   });
   router.put("/consent/withdraw", requireAuth, withdraw);
   router.post("/consent/withdraw", requireAuth, withdraw);
+
+  /**
+   * Authenticated: the withdrawal page, listing only currently-granted,
+   * withdrawable purposes - given the same prominence as consenting, per
+   * Rule 3(c)(i). Carries PII-adjacent state (which purposes are granted),
+   * so it gets the same no-store treatment as GET /consent below.
+   */
+  router.get(
+    "/consent/withdraw",
+    requireAuth,
+    noStore,
+    wrap(async (req, res) => {
+      const { state } = await getConsentState({ models, principalId: req.principalId });
+      res.type("html").send(renderWithdrawalPage({ basePath: req.baseUrl, state }));
+    })
+  );
 
   /**
    * The Section 11 right of access: the full event ledger, not just current
@@ -532,7 +574,9 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
     // name, not mongoose's raw text - that text quotes the offending value back.
     if (err && (err.name === "ValidationError" || err.name === "CastError")) {
       const fields = err.errors ? Object.keys(err.errors).join(", ") : err.path;
-      return res.status(400).json({ error: `Invalid value for: ${fields}` });
+      const message = `Invalid value for: ${fields}`;
+      if (wantsHtml(req)) return res.status(400).type("html").send(`<p>${escapeHtml(message)}</p>`);
+      return res.status(400).json({ error: message });
     }
 
     // A deliberate AppError below 500 is safe to echo - the message is written
@@ -540,7 +584,14 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
     // internal configuration detail (utils/principalId.js throws one naming
     // PRINCIPAL_ID_SECRET and how to generate it, and that path is reachable
     // from the unauthenticated POST /consent route).
+    //
+    // A browser gets the same message rendered as HTML rather than a JSON
+    // body - a data principal filling in the consent form has no way to read
+    // JSON. This is also the answer a minor rejected for want of verifiable
+    // parental consent (422, see persistPIIwithconsent) actually sees: the
+    // stated reason, not a raw status code they cannot act on.
     if (err && typeof err.status === "number" && err.status < 500) {
+      if (wantsHtml(req)) return res.status(err.status).type("html").send(`<p>${escapeHtml(err.message)}</p>`);
       return res.status(err.status).json({ error: err.message });
     }
 
