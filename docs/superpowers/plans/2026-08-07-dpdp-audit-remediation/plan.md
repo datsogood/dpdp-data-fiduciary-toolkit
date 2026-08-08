@@ -1725,12 +1725,12 @@ async function escalateToBoard({ models, refId, principalId } = {}) {
   assertNonEmptyString(refId, "refId", 64);
   assertPrincipalId(principalId);
 
-  const grievance = await models.Grievance.findOne({ refId });
+  // Ownership goes in the FILTER, not a comparison after the fetch. Fetching
+  // by refId alone and then throwing 403 tells a caller that a reference they
+  // do not own exists, which is an existence oracle for GR- references - and it
+  // contradicts getGrievance, which 404s the identical probe.
+  const grievance = await models.Grievance.findOne({ refId, principalId });
   if (!grievance) throw new AppError("No grievance found with that reference", 404);
-  if (grievance.principalId !== principalId) {
-    // Do not reveal whether the reference exists for someone else.
-    throw new AppError("This grievance does not belong to you", 403);
-  }
   ...
 ```
 
@@ -3222,7 +3222,15 @@ async function getConsentState({ models, principalId }) {
     state: record.currentState(),
     ledger: record.events.map((e) => ({
       type: e.type, status: e.status, basis: e.basis,
-      lawfulBasisKind: e.lawfulBasisKind, receiptId: e.receiptId, timestamp: e.timestamp,
+      lawfulBasisKind: e.lawfulBasisKind, receiptId: e.receiptId,
+      // noticeVersion is the whole point of the per-event notice design: it is
+      // what lets an auditor resolve "what was this person told when they
+      // granted marketing in January" against the NoticeVersion collection.
+      // Omitting it here while currentState() serialises it on the latest
+      // event per type would expose the pointer for the present and hide it
+      // for the history, which is the wrong way round.
+      noticeVersion: e.noticeVersion,
+      timestamp: e.timestamp,
     })),
     notice: record.lastNotice ? { version: record.lastNotice.version, language: record.lastNotice.language, shownAt: record.lastNotice.shownAt } : null,
     pii: principal && !principal.erasedAt ? principal.pii : null,
@@ -3244,6 +3252,22 @@ async function listRightsRequests({ models, principalId }) {
   assertPrincipalId(principalId);
   const rows = await models.RightsRequest.find({ principalId }).sort({ createdAt: -1 }).lean();
   return rows.map(({ refId, right, details, status, createdAt, updatedAt }) => ({ refId, right, details, status, createdAt, updatedAt }));
+}
+```
+
+- [ ] **Step 4b: Mark the PII-bearing reads uncacheable**
+
+These are the first cacheable responses in the toolkit that carry personal data. `GET /consent` returns name, email, phone, dob, PAN and address on a URL with no user-identifying component, distinguished only by the host's session cookie - so a shared cache or CDN in front of the host, or a browser's disk and back-forward cache on a shared machine, can serve one data principal's response to the next. Every pre-existing PII route was POST or PUT and therefore not cacheable; the risk arrives with this task.
+
+Apply alongside `requireAuth` on the authenticated read routes:
+
+```js
+function noStore(req, res, next) {
+  // These responses are per-principal and carry PII. Vary on Cookie because
+  // the host authenticates by cookie and the URL does not identify anyone.
+  res.set("Cache-Control", "no-store");
+  res.set("Vary", "Cookie");
+  next();
 }
 ```
 

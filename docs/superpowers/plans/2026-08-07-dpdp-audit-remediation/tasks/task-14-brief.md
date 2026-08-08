@@ -175,6 +175,22 @@ If sharing a single server across files proves impractical under `node --test`'s
 Run: `npm test`
 Expected: every test file passes. Record the total count in the report.
 
+- [ ] **Step 4c: Sweep the remaining em dashes**
+
+The Global Constraints forbid em and en dashes, and every task enforced it on lines it touched - correctly, under surgical-changes discipline. That leaves pre-existing ones in files no task rewrote wholesale. Known at time of writing: `src/index.js`, `src/models/ConsentManagerRequest.js`, `src/http/forms.js`, `src/services/consentManagerRequest.js`, `src/services/complaintToTheBoard.js`, `src/services/dataPrincipalRights.js`.
+
+```bash
+grep -rn $'[\u2013\u2014]' src/ examples/ test/ README.md
+```
+
+Replace each with a hyphen. This is the one task allowed to touch those lines, because it is the only one whose remit is the whole surface.
+
+- [ ] **Step 4d: Note the `lastNotice` shape change for anyone with existing data**
+
+Task 8 moved notice bodies out of `ConsentRecord.lastNotice` into the content-addressed `NoticeVersion` collection, leaving `lastNotice` as a `{ version, language, shownAt }` pointer. A document written before that change physically retains its `lastNotice.body` at rest, and Mongoose strict mode drops it silently on the next read or save - so the old body is lost without warning rather than migrated.
+
+The package is unpublished at 0.x and no deployment exists, so no migration script is warranted. But say so plainly in the README's "Migrating from 0.1.0" section rather than letting someone discover it: if you have `ConsentRecord` documents from before this change, copy `lastNotice.body` into `NoticeVersion` keyed by `lastNotice.version` before upgrading, or the text of those notices is gone.
+
 - [ ] **Step 5b: Verify `.env.example` is actually complete**
 
 Run and reconcile - the two lists must match exactly:

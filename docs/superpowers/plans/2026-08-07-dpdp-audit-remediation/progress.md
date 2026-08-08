@@ -407,3 +407,33 @@ Task 8: minor (deferred) -> T14 Step 4d: ConsentRecord documents written before 
   shape change retain lastNotice.body at rest, and strict mode drops it silently on next
   read/save. Package is unpublished so no migration script, but the README must say so.
 Task 8: complete (commits 5bca5e0..d26299b, review approved + 1 fix round)
+Task 10: implementer DONE, 102/102, then fix round 1 (3 Important + 3 minors; commits
+  dc236e2..74de8d3), 105/105. C4 CLOSED.
+Task 10: task review (opus) APPROVED - could not construct any cross-principal read. It tried
+  operator injection through principalId, an undefined principalId collapsing the filter to
+  match-all, spread-built filters, fetch-then-check timing leaks and route shadowing; all held.
+  It also checked each cross-principal test for vacuity and confirmed none passes for the wrong
+  reason, noting the implementer created a second REAL principal rather than re-pointing
+  resolvePrincipal at an unknown id. 3 Important:
+   1. the ledger dropped noticeVersion - MY Step 3 defect. It undercut the implementer's own
+      (correct) justification for not resolving notice bodies, which rested on the ledger
+      carrying that pointer. Also internally inconsistent: currentState() serialises raw event
+      subdocs which DO include it, so the present exposed the pointer and the history hid it.
+   2. the PII reads were cacheable - first cacheable responses in the toolkit carrying personal
+      data, on a URL with no user-identifying component. Fixed with no-store + Vary: Cookie.
+   3. escalateToBoard was still an existence oracle (403 for another principal's grievance while
+      the new getGrievance 404s the same probe). Folded principalId into the filter; the Task 5
+      test was UPDATED in place, not deleted, and still proves a non-owner cannot escalate.
+Task 10: re-review honestly flagged that one new test (valid-but-nonexistent refId) guards
+  pre-existing code and would pass regardless of this round - good calibration, kept anyway
+  since it closes a real coverage gap.
+Task 10: minor (deferred) -> follow-up: no GET /consent-manager/requests/:refId item route;
+  ConsentManagerRequest.updatedAt has a creation default but no code path mutates it;
+  consentManagerRequest.js's function-export-with-property shape is an ESM interop hazard.
+Task 10: complete (commits b8391ca..74de8d3, review approved + 1 fix round)
+
+PULLING TEST INFRASTRUCTURE FORWARD from T14. The mongod-per-withDb flake has now hit on
+  Task 5's and Task 10's runs. Each task adds withDb calls and each call boots its own server,
+  so exposure grows monotonically - and four tasks plus the whole-branch review still depend on
+  a trustworthy suite. Fixing it now rather than at T14, where it would only protect the last
+  task's own verification.
