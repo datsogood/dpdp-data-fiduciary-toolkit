@@ -291,3 +291,136 @@ Two things I checked and deliberately did *not* change:
    cannot be undone. This is out of scope for Task 5 and the spec notes it under the C1
    follow-ups, but it is the most serious remaining gap in the HTTP layer and it is *created*
    by making auth work. It needs an owner before the browser surface (T13) ships.
+
+---
+
+# Fix round 1
+
+**Commit:** `4a805b9` - `fix: resolve identity by id on the authenticated consent update`
+
+## 1. The double resolution (Important)
+
+Fixed structurally, as directed. `persistPIIwithconsent` gained an optional `principalId`; when
+present it resolves with `models.Principal.findOne({ principalId })` and never touches
+`findOrCreatePrincipal`. `PUT /consent` passes `principalId: req.principalId`. I carried the
+plan's docstring verbatim so nobody deletes the branch as redundant.
+
+One addition to the plan's snippet: `assertPrincipalId(principalId)` before the `findOne`. The
+value reaches a Mongoose filter, and the Global Constraint requires per-field validation as the
+primary control. On the router path `requireAuth` has already regex-checked it, but the service
+is framework-agnostic and a direct caller has no such guarantee.
+
+**This was a real bug, and the rotation test proves it.** I removed the one-line fix and re-ran:
+
+```
+✖ PUT /consent still lands on the session principal after PRINCIPAL_ID_SECRET is rotated
+    actual:   '9de5f4ec81c2351bf46ab64fd114e06e51cdbc954b264c907fe471dc5e419270'
+    expected: 'b59ee8904d8ff68dca6c5d9429f633a9b8ba138bb535f10f308a24880dbdd5c4'
+```
+
+A *different* principalId came back - the new principal being minted, exactly as the reviewer
+predicted.
+
+**The household test passed without the fix**, which is worth recording rather than hiding: it
+confirms the reviewer's diagnosis precisely. Insertion ordering supplies the right answer, so
+that scenario cannot fail while the ordering holds. I kept the test as a correctness assertion
+but it is the rotation test that is the real regression guard. I could not construct the
+adversarial insertion order through the public API - registering the phone-only principal
+*second* is refused by the 409 - so building it would need direct document fixtures. Given the
+rotation test pins the mechanism deterministically, I judged that not worth the fixture
+machinery.
+
+## The age gate on the update path
+
+**Decision: the gate runs on every path, signup and update alike.** I agree with your lean, and
+the deciding argument is stronger than "a minor's data is a minor's data".
+
+`isMinor` is persisted on the Principal and `decideFor` reads it on every call to refuse any
+purpose marked `prohibitedForChildren`. If the gate were skipped when `principalId` is supplied,
+that flag would go stale and `PUT /consent` would become a route on which a child could be
+granted `marketing` or `analytics` - the exact processing Section 9 restricts. Skipping the gate
+would not be a relaxation, it would be a bypass of the Task 9 work.
+
+The cost is the one you identified: a stored principal with no `dob` now gets 400 on a consent
+update. That is correct and I would not soften it. Since Task 9 made `dob` required, every
+principal this library creates has one; a principal without one can only have been inserted by
+the host directly, and the 400 tells it plainly that it must collect a date of birth before it
+can record a consent decision. Silently skipping the gate for those records would make the
+compliance posture depend on how the principal happened to be created.
+
+I extended the comment above the gate to say this, so the "runs before any write" rationale is
+not mistaken for the whole reason it is there.
+
+## 2. The body-principalId test now tests its claim
+
+You were right that it was hollow. I kept the 401 case (it guards default-deny) and added
+`principalId in the request body is ignored by an AUTHENTICATED handler too`: signed in as
+Bhim, `POST /grievance` with Asha's `principalId` in the body, asserting the stored
+`Grievance.principalId` is Bhim's **and** that Asha has zero grievances.
+
+## 3. Form-encoded withdrawal
+
+Added, covering both methods - `POST` with one ticked box and `PUT` with one - and asserting
+the resulting `currentState()`, so it fails if `asArray` regresses on the route where that would
+deny a statutory right.
+
+## 4. `onGrievanceFiled` is no longer fatal
+
+Caught and logged, with the reasoning in both the call site and a new `createRouter` JSDoc block
+documenting all four options. Verified by execution:
+
+```
+onWithdrawal throw      -> 500 {"error":"internal error"}
+onGrievanceFiled throw  -> 201 refId present: true | leaks secret: false
+```
+
+I deliberately did **not** apply the same treatment to `onWithdrawal`, and documented the
+asymmetry. A re-submitted withdrawal is idempotent (the M9 fix returns `noChange`), so the
+duplicate-filing harm does not arise; and `onWithdrawal` is how the host learns it must cease
+processing and erase. A host whose pipeline is down needs that to fail loudly rather than have
+the library swallow it and leave data being processed after a withdrawal. It also lives in
+`withdrawConsent.js`, which is not mine to change.
+
+**This collides with Task 12's planned test.** `test/http.test.js` as written in the plan uses
+`onGrievanceFiled: () => { throw new Error("SECRET internal detail"); }` to force an internal
+fault and asserts 500; with this change it will get 201 and fail. `onWithdrawal` is a drop-in
+replacement - verified above, it still produces `500 {"error":"internal error"}` through
+`PUT /consent/withdraw`. Task 12 needs that one-line swap before it is written.
+
+## 5. Victim-ledger assertion widened
+
+Now snapshots the victim's ledger before the attack and compares `events.length` plus a full
+`JSON.stringify`, matching the 409 test.
+
+## Test results
+
+```
+$ node --test test/auth.test.js
+ℹ tests 16
+ℹ pass 16
+ℹ fail 0
+ℹ duration_ms 11984
+```
+
+```
+$ npm test
+ℹ tests 81
+ℹ pass 81
+ℹ fail 0
+ℹ duration_ms 30313
+```
+
+81 = 65 baseline + 16. Wall clock ~30.5s. Output pristine. No em or en dashes and no non-ASCII
+in any added line; no `body.principalId` or `query.principalId` anywhere in `src/`.
+
+The existing `consent.test.js` and `children.test.js` passing unchanged confirms the
+`persistPIIwithconsent` signature change is backwards compatible - `principalId` is optional and
+the signup path is untouched.
+
+## One thing I got wrong on the way
+
+My first version of the household test asserted the housemate's ledger contained no
+`underwriting` event. It failed: Riya's own signup already records `underwriting: denied`,
+because a submitted consent decision walks the whole catalog and denies what was not chosen. The
+assertion was wrong, not the code. Fixed by snapshotting and comparing, which is the more robust
+form anyway.

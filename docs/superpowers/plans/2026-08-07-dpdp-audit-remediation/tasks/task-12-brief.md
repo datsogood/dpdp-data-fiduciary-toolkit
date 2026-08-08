@@ -128,15 +128,22 @@ test("an internal fault is 500 with a generic body, not 400 with the raw message
       db: conn,
       resolvePrincipal: () => principalId,
       // Force an internal fault from inside a handler.
-      onGrievanceFiled: () => { throw new Error("SECRET internal detail"); },
+      //
+      // Must be onWithdrawal, NOT onGrievanceFiled. Task 5 made the grievance
+      // hook non-fatal on purpose: a throwing host callback used to produce a
+      // generic 500 and the data principal never learned their refId, so they
+      // re-filed and created a duplicate grievance. onWithdrawal is
+      // deliberately still fatal - it is how the host learns it must cease
+      // processing, and a withdrawal is idempotent, so it should fail loudly.
+      onWithdrawal: () => { throw new Error("SECRET internal detail"); },
     }));
     const server = app.listen(0);
     const port = server.address().port;
     try {
-      const res = await fetch(`http://localhost:${port}/dpdp/grievance`, {
-        method: "POST",
+      const res = await fetch(`http://localhost:${port}/dpdp/consent/withdraw`, {
+        method: "PUT",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ subject: "s", description: "d" }),
+        body: JSON.stringify({ consentTypes: ["marketing"] }),
       });
       assert.equal(res.status, 500, "an internal fault must not be reported as a client error");
       const body = await res.json();

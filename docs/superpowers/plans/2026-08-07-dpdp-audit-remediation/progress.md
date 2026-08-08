@@ -356,3 +356,25 @@ Task 5: minor (deferred) -> T13: GET /consent/new and GET /consent/withdraw are 
 Task 5: minor (deferred) -> T14: mongod-per-withDb flake, one port-bind failure in five runs.
   Reviewer's point is right that flake rate scales with every task that adds tests, and a suite
   failing 20% of the time trains people to re-run rather than read.
+Task 5: fix round 1/5 (1 Important + 4 minors addressed, 0 open; commits d3b8f42..4a805b9).
+  81/81. Implementer PROVED the finding by reverting the one-line fix and capturing the failing
+  output - a different, newly minted principalId came back. It also disclosed that the household
+  test passed WITHOUT the fix, confirming the reviewer's diagnosis that MongoDB insertion
+  ordering had been supplying the guarantee.
+Task 5: re-review named which tests actually discriminate: ONLY the secret-rotation test fails on
+  a revert. The household test and the countDocuments assertions pass either way, because an
+  un-rotated principal's own stored email re-finds its own document. Worth remembering - "the
+  required test was added" is not the same as "the property is guarded".
+Task 5: minor (deferred): the onGrievanceFiled try/catch has no automated test, only a manual
+  console trace. Nothing would fail if it were deleted. -> T12 or T14.
+Task 5: judgement calls both upheld by the reviewer - (a) the age gate must run on the update
+  path too, because isMinor is read by decideFor, so skipping it would make PUT /consent a route
+  where a child can be granted marketing; a stored principal with no dob now 400s on a consent
+  update, which is the more defensible failure; (b) onWithdrawal stays fatal while
+  onGrievanceFiled becomes non-fatal - a re-submitted withdrawal is idempotent and returns
+  noChange, whereas a re-filed grievance creates a second document, and onWithdrawal is the
+  host's only signal to cease processing.
+Task 5: FORWARD DEPENDENCY handled - T12's planned fault-injection test used onGrievanceFiled
+  throwing to force a 500, which this fix makes non-fatal. Plan updated to use onWithdrawal via
+  PUT /consent/withdraw instead. T12 brief regenerated.
+Task 5: complete (commits 05a283f..4a805b9, review approved + 1 fix round). C1 CLOSED.
