@@ -58,7 +58,7 @@ module.exports = {
   // just verified this email/phone belongs to this person" (an emailed
   // one-time link, an OTP, whatever the host's own auth does) into the
   // principalId that resolvePrincipal must return - the building block for
-  // real sign-in, not just the demo login in examples/server.js.
+  // real sign-in, not just the demo login in examples/server-express.js.
   findPrincipalByContact,
   // The supported way to honour a Section 12 correction of a principal's own
   // contact details. Deliberately NOT mounted on a route: changing a stored

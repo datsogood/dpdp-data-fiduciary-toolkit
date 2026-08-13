@@ -23,7 +23,7 @@ test("the documented public API is all exported", () => {
     "buildNotice", "newPrincipalId",
     // Restored in the same fix round: the building block for a host's own
     // sign-in (turn a verified contact detail into a principalId), used by
-    // examples/server.js's demo login and needed by anyone doing the same
+    // examples/server-express.js's demo login and needed by anyone doing the same
     // thing for real.
     "findPrincipalByContact",
     "CONSENT_CATALOG", "RIGHTS_CATALOG", "FIDUCIARY",

@@ -3,11 +3,11 @@ const { wantsHtml } = require("../negotiate");
 
 /**
  * @param {unknown} err
- * @param {string|undefined} acceptHeader
+ * @param {{ accepts: (types: string[]) => string|false }} req
  * @returns {import("./types").HttpResult}
  */
-function mapError(err, acceptHeader) {
-  const html = wantsHtml(acceptHeader);
+function mapError(err, req) {
+  const html = wantsHtml(req);
 
   if (err && (err.name === "ValidationError" || err.name === "CastError")) {
     const fields = err.errors ? Object.keys(err.errors).join(", ") : err.path;

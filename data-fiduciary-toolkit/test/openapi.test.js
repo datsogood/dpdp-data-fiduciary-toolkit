@@ -47,6 +47,25 @@ test("GET /openapi.json on the Express router returns the live spec", async () =
   });
 });
 
+test("GET /docs on the Express router serves Swagger UI", async () => {
+  await withDb(async (conn) => {
+    const app = express();
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => null }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      const res = await fetch(`http://localhost:${port}/dpdp/docs`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get("content-type") || "", /text\/html/);
+      const html = await res.text();
+      assert.match(html, /swagger/i);
+      assert.match(html, /\/dpdp\/openapi\.json/);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
 test("committed openapi/openapi.json matches buildOpenApiDocument (run npm run openapi:generate to refresh)", () => {
   const expected = buildOpenApiDocument({ serverUrl: "http://localhost:4000" });
   const committed = JSON.parse(fs.readFileSync(COMMITTED, "utf8"));

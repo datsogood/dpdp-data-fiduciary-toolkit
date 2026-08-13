@@ -20,7 +20,8 @@
   ],
   "scripts": {
     "test": "node --test --test-global-setup=scripts/test-setup.js",
-    "example": "node examples/server.js",
+    "example": "node examples/server-express.js",
+    "example:express": "node examples/server-express.js",
     "example:fastify": "node examples/server-fastify.js",
     "openapi:generate": "node scripts/generate-openapi.js",
     "openapi:check": "node scripts/generate-openapi.js --check"
@@ -30,17 +31,24 @@
     "fastify": "^5.0.0"
   },
   "peerDependenciesMeta": {
-    "express": { "optional": true },
-    "fastify": { "optional": true }
+    "express": {
+      "optional": true
+    },
+    "fastify": {
+      "optional": true
+    }
   },
   "dependencies": {
-    "mongoose": "^8.5.0",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "mongoose": "^8.5.0"
   },
   "devDependencies": {
     "@fastify/formbody": "^8.0.2",
+    "@fastify/swagger": "^9.8.1",
+    "@fastify/swagger-ui": "^5.2.6",
     "express": "^4.19.2",
     "fastify": "^5.2.1",
-    "mongodb-memory-server": "^10.1.2"
+    "mongodb-memory-server": "^10.1.2",
+    "swagger-ui-express": "^5.0.1"
   }
 }

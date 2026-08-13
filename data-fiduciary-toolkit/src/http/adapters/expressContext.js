@@ -33,6 +33,7 @@ function expressContext(req) {
     body: req.body || {},
     principalId: req.principalId ?? null,
     host: req.get("host") || "",
+    req,
   };
 }
 

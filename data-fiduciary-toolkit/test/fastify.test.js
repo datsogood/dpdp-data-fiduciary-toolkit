@@ -65,6 +65,39 @@ test("GET /openapi.json on the Fastify plugin returns the live spec", async () =
   });
 });
 
+test("GET /docs serves Swagger UI", async () => {
+  await withDb(async (conn) => {
+    const fastify = fastifyFactory({ logger: false });
+    await fastify.register(createPlugin({ db: conn, resolvePrincipal: () => null }), { prefix: "/dpdp" });
+    await fastify.ready();
+    try {
+      const res = await fastify.inject({ method: "GET", url: "/dpdp/docs" });
+      assert.equal(res.statusCode, 200);
+      assert.match(res.headers["content-type"] || "", /text\/html/);
+      assert.match(res.payload, /swagger/i);
+    } finally {
+      await fastify.close();
+    }
+  });
+});
+
+test("Swagger UI JSON has the same path keys as buildOpenApiDocument", async () => {
+  await withDb(async (conn) => {
+    const fastify = fastifyFactory({ logger: false });
+    await fastify.register(createPlugin({ db: conn, resolvePrincipal: () => null }), { prefix: "/dpdp" });
+    await fastify.ready();
+    try {
+      const expected = buildOpenApiDocument({ basePath: "/dpdp" });
+      const res = await fastify.inject({ method: "GET", url: "/dpdp/docs/json" });
+      assert.equal(res.statusCode, 200);
+      const fromSwagger = JSON.parse(res.payload);
+      assert.deepEqual(Object.keys(fromSwagger.paths).sort(), Object.keys(expected.paths).sort());
+    } finally {
+      await fastify.close();
+    }
+  });
+});
+
 test("createPlugin refuses to start with a placeholder DPO contact", async () => {
   await withDb(async (conn) => {
     const saved = process.env.FIDUCIARY_DPO_EMAIL;

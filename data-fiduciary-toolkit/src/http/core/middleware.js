@@ -41,7 +41,7 @@ function noStoreHeaders() {
  * @returns {import("./types").HttpResult}
  */
 function authRequiredResult(ctx) {
-  if (wantsHtml(ctx.headers.accept)) {
+  if (wantsHtml(ctx.req)) {
     const signInUrl = escapeHtml(`${ctx.basePath}/consent/new`);
     return {
       status: 401,

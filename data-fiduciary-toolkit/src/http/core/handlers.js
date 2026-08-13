@@ -42,7 +42,7 @@ function createHandlers({ models, onWithdrawal, onGrievanceFiled }) {
       consentTypes: asArray(ctx.body.consentTypes),
       onWithdrawal,
     });
-    if (wantsHtml(ctx.headers.accept)) {
+    if (wantsHtml(ctx.req)) {
       return {
         status: 200,
         headers: noStoreHeaders(),
@@ -68,7 +68,7 @@ function createHandlers({ models, onWithdrawal, onGrievanceFiled }) {
       const result = await persistPIIwithconsent({
         models, pii, consentTypes: readConsentTypes(ctx.body), notice,
       });
-      if (wantsHtml(ctx.headers.accept)) {
+      if (wantsHtml(ctx.req)) {
         return {
           status: 201,
           headers: noStoreHeaders(),
@@ -111,7 +111,7 @@ function createHandlers({ models, onWithdrawal, onGrievanceFiled }) {
     withdrawConsentPost: withdraw,
 
     listRights(ctx) {
-      if (wantsHtml(ctx.headers.accept)) {
+      if (wantsHtml(ctx.req)) {
         return { status: 200, html: renderRightsPage({ basePath: ctx.basePath }) };
       }
       return { status: 200, json: listRights() };
@@ -124,7 +124,7 @@ function createHandlers({ models, onWithdrawal, onGrievanceFiled }) {
         right: ctx.body.right,
         details: ctx.body.details,
       });
-      if (wantsHtml(ctx.headers.accept)) {
+      if (wantsHtml(ctx.req)) {
         return {
           status: 201,
           html: `<p>Request received. Reference: <b>${escapeHtml(result.refId)}</b></p>`,
@@ -162,7 +162,7 @@ function createHandlers({ models, onWithdrawal, onGrievanceFiled }) {
           console.error("[dpdp-toolkit] onGrievanceFiled threw after the grievance was filed:", hookErr);
         }
       }
-      if (wantsHtml(ctx.headers.accept)) {
+      if (wantsHtml(ctx.req)) {
         return {
           status: 201,
           html:
@@ -204,7 +204,7 @@ function createHandlers({ models, onWithdrawal, onGrievanceFiled }) {
         message: ctx.body.message,
         preferredConsentManager: ctx.body.preferredConsentManager,
       });
-      if (wantsHtml(ctx.headers.accept)) {
+      if (wantsHtml(ctx.req)) {
         return {
           status: 201,
           html: `<p>Request received. Reference: <b>${escapeHtml(result.refId)}</b></p>`,

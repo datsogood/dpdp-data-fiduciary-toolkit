@@ -8,6 +8,7 @@
  * @property {object} body
  * @property {string|null} [principalId]
  * @property {string} host
+ * @property {{ accepts: (types: string[]) => string|false }} req - for content negotiation
  */
 
 /**

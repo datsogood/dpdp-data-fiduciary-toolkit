@@ -1,4 +1,4 @@
-// Runnable demo of the toolkit end to end.
+// Runnable Express demo of the toolkit end to end.
 //
 // Sequence:
 //   1. POST /consent            - create a principal (pii + consentTypes)
@@ -7,6 +7,8 @@
 //   3. any authenticated route  - send the token back as x-demo-session
 //
 // Example, with the server running on the default port:
+//
+//   Open http://localhost:4000/docs for Swagger UI (OpenAPI JSON at /openapi.json).
 //
 //   curl -s localhost:4000/consent -X POST -H 'Content-Type: application/json' -d '{
 //     "pii": {"name":"Asha Rao","email":"asha@example.com","dob":"1990-01-01"},
@@ -74,7 +76,7 @@ async function main() {
   }));
 
   const port = process.env.PORT || 4000;
-  app.listen(port, () => console.log(`DPDP toolkit example running on http://localhost:${port}`));
+  app.listen(port, () => console.log(`DPDP toolkit Express example running on http://localhost:${port}`));
 }
 
 main().catch((err) => { console.error("Failed to start:", err); process.exit(1); });

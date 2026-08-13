@@ -24,6 +24,12 @@ function fastifyContext(request, basePath) {
     if (v === undefined) continue;
     headers[k.toLowerCase()] = Array.isArray(v) ? v[0] : String(v);
   }
+  const acc = require("accepts")({ headers: request.headers });
+  const req = {
+    accepts(types) {
+      return acc.types(types);
+    },
+  };
   return {
     method: request.method,
     basePath,
@@ -33,6 +39,7 @@ function fastifyContext(request, basePath) {
     body: request.body || {},
     principalId: request.principalId ?? null,
     host: request.headers.host || "",
+    req,
   };
 }
 

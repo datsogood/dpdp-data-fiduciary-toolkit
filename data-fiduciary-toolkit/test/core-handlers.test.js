@@ -9,16 +9,23 @@ const { createHttpCore } = require("../src/http/core/createHttpCore");
 const { PII } = require("./helpers/httpHarness");
 const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
 
+function mockReq(acceptHeader = "application/json") {
+  const acc = require("accepts")({ headers: { accept: acceptHeader } });
+  return { accepts: (types) => acc.types(types) };
+}
+
 function ctx(overrides = {}) {
+  const accept = overrides.headers?.accept ?? "application/json";
   return {
     method: "GET",
     basePath: "/dpdp",
-    headers: { accept: "application/json" },
+    headers: { accept },
     query: {},
     params: {},
     body: {},
     principalId: null,
     host: "localhost",
+    req: mockReq(accept),
     ...overrides,
   };
 }

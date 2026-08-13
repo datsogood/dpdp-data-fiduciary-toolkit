@@ -1,4 +1,7 @@
-// Runnable Fastify demo — same curl sequence as examples/server.js.
+// Runnable Fastify demo — same curl sequence as examples/server-express.js.
+//
+// After start, open http://localhost:4000/docs for Swagger UI (OpenAPI JSON
+// remains at http://localhost:4000/openapi.json).
 //
 //   curl -s localhost:4000/consent -X POST -H 'Content-Type: application/json' -d '{
 //     "pii": {"name":"Asha Rao","email":"asha@example.com","dob":"1990-01-01"},

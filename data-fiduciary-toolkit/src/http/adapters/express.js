@@ -31,6 +31,13 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   router.use(express.json({ limit: "100kb" }));
   router.use(express.urlencoded({ extended: false, limit: "100kb" }));
 
+  const swaggerUi = require("swagger-ui-express");
+  router.use("/docs", swaggerUi.serve);
+  router.get("/docs", (req, res, next) => {
+    const specUrl = `${req.baseUrl}/openapi.json`;
+    swaggerUi.setup(null, { swaggerOptions: { url: specUrl } })(req, res, next);
+  });
+
   router.get("/openapi.json", (req, res) => {
     res.set("Cache-Control", "no-store");
     res.status(200).json(buildOpenApiDocument({ basePath: req.baseUrl }));
@@ -71,7 +78,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   }
 
   router.use((err, req, res, _next) => {
-    sendExpressResult(res, mapError(err, expressContext(req).headers.accept));
+    sendExpressResult(res, mapError(err, req));
   });
 
   return router;

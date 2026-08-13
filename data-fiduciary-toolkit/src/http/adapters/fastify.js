@@ -22,6 +22,16 @@ function createPlugin({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
 
     await fastify.register(require("@fastify/formbody"));
 
+    const document = buildOpenApiDocument({ basePath });
+    await fastify.register(require("@fastify/swagger"), {
+      mode: "static",
+      specification: { document },
+    });
+    await fastify.register(require("@fastify/swagger-ui"), {
+      routePrefix: "/docs",
+      staticCSP: true,
+    });
+
     fastify.addHook("onRoute", (routeOptions) => {
       if (!routeOptions.config) routeOptions.config = {};
       if (routeOptions.bodyLimit === undefined) routeOptions.bodyLimit = 102400;
@@ -29,7 +39,7 @@ function createPlugin({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
 
     fastify.get("/openapi.json", async (request, reply) => {
       reply.header("Cache-Control", "no-store");
-      return reply.code(200).send(buildOpenApiDocument({ basePath }));
+      return reply.code(200).send(document);
     });
 
     for (const entry of routeRegistry) {
@@ -71,7 +81,7 @@ function createPlugin({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
     }
 
     fastify.setErrorHandler((err, request, reply) => {
-      sendFastifyResult(reply, mapError(err, fastifyContext(request, basePath).headers.accept));
+      sendFastifyResult(reply, mapError(err, fastifyContext(request, basePath).req));
     });
   };
 }

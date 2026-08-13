@@ -102,7 +102,10 @@ async function main() {
 main().catch((err) => { console.error(err); process.exit(1); });
 ```
 
-`express` is a peer dependency - install it in your own project.
+`express` is a peer dependency - install it in your own project. The router
+registers `swagger-ui-express` for interactive docs — install it alongside
+`express` in your project. A runnable demo is in `examples/server-express.js`
+— run it with `npm run example:express` (or `npm run example`).
 
 ### Fastify
 
@@ -126,18 +129,23 @@ main().catch((err) => { console.error(err); process.exit(1); });
 ```
 
 `fastify` is also a peer dependency (optional alongside Express). The plugin
-registers `@fastify/formbody` internally for urlencoded forms. A runnable demo
-is in `examples/server-fastify.js` — run it with `npm run example:fastify`.
+registers `@fastify/formbody` internally for urlencoded forms, and
+`@fastify/swagger` + `@fastify/swagger-ui` for interactive docs. Install those
+alongside `fastify` in your project. A runnable demo is in
+`examples/server-fastify.js` — run it with `npm run example:fastify`. The
+Express equivalent is `examples/server-express.js` (`npm run example:express`,
+or `npm run example`).
 
 Both adapters serve an identical route set and expose `GET /openapi.json` at
-the mount prefix.
+the mount prefix. Swagger UI is also available at `{prefix}/docs` on both
+adapters (for example `/dpdp/docs`).
 
 The snippet above assumes `req.session.principalId` is already populated by
 your own auth, which it has nothing to sign a session in with - every
 authenticated route will 401 until you wire that up. For a complete, runnable
-version, see `examples/server.js`: it adds a deliberately-labelled demo
+version, see `examples/server-express.js`: it adds a deliberately-labelled demo
 sign-in (`POST /demo/login`) so the authenticated routes are actually
-reachable end to end. Run it with `npm run example` (needs a Mongo instance
+reachable end to end. Run it with `npm run example:express` (needs a Mongo instance
 at `MONGO_URI`) and read the file's header comment for the full curl
 sequence.
 
@@ -174,7 +182,7 @@ Building that session lookup usually starts from a contact detail you have
 just verified (an emailed one-time link, an OTP) - `findPrincipalByContact({
 models, email, phone })` is exported for exactly that: it turns a verified
 contact detail into the `principalId` your session should carry.
-`examples/server.js`'s demo login uses it; a real deployment's own sign-in
+`examples/server-express.js`'s demo login uses it; a real deployment's own sign-in
 would too.
 
 **A phone number is not an identity.** This toolkit's stated audience shares
