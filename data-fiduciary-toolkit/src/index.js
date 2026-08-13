@@ -9,6 +9,8 @@ const consentManagerRequest = require("./services/consentManagerRequest");
 const { erasePrincipalPII } = require("./services/erasure");
 const { advanceRightsRequest, advanceGrievance, advanceConsentManagerRequest } = require("./services/requestLifecycle");
 const createRouter = require("./http/router");
+const { createPlugin } = require("./http/adapters/fastify");
+const { buildOpenApiDocument } = require("./openapi/buildSpec");
 const { buildNotice } = require("./config/notice");
 const { newPrincipalId, findPrincipalByContact, updatePrincipalContact } = require("./utils/principalId");
 const { CONSENT_CATALOG, RIGHTS_CATALOG, FIDUCIARY } = require("./config/catalog");
@@ -45,6 +47,9 @@ module.exports = {
   advanceConsentManagerRequest,
   // Express router with every route pre-wired.
   createRouter,
+  // Fastify plugin with the same routes and behaviour.
+  createPlugin,
+  buildOpenApiDocument,
   // The Section 5 notice generator, and a fresh random identifier - exposed
   // for a host building its own UI or transport around the services above.
   buildNotice,

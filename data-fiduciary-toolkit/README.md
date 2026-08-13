@@ -33,6 +33,17 @@ The following is a summary of all the responsibilities of a data fiduciary (the 
 We're in the process of creating APIs that encapsulate the obligations above so that each data fiduciary can adhere to the DPDP act completely and with ease.
 See "What this is not" and "Breaking changes in 0.2.0" below for exactly where that process currently stands and what changed getting here.
 
+## Breaking changes in 0.3.0
+
+- **No breaking changes for Express.** `createRouter({ db, resolvePrincipal(req), ... })`
+  and mounting with `app.use(prefix, router)` are unchanged.
+- **New:** `createPlugin` for Fastify — register with
+  `app.register(createPlugin(opts), { prefix: "/dpdp" })`. The hook signature is
+  `resolvePrincipal(request)` (Fastify request object), not Express `req`.
+- **New:** `buildOpenApiDocument({ basePath, serverUrl })` and `GET /openapi.json`
+  on both adapters. Run `npm run openapi:generate` to refresh the committed
+  snapshot under `openapi/openapi.json`.
+
 ## Breaking changes in 0.2.0
 
 A 0.1.0 integration will not boot against 0.2.0 without changes:
@@ -92,6 +103,34 @@ main().catch((err) => { console.error(err); process.exit(1); });
 ```
 
 `express` is a peer dependency - install it in your own project.
+
+### Fastify
+
+```js
+const fastify = require("fastify")();
+const { connect, createPlugin } = require("dpdp-fiduciary-toolkit");
+
+async function main() {
+  const db = await connect(process.env.MONGO_URI);
+
+  await fastify.register(createPlugin({
+    db,
+    // Fastify convention: resolvePrincipal receives the Fastify request.
+    resolvePrincipal: (request) => request.session?.principalId ?? null,
+  }), { prefix: "/dpdp" });
+
+  await fastify.listen({ port: 4000 });
+}
+
+main().catch((err) => { console.error(err); process.exit(1); });
+```
+
+`fastify` is also a peer dependency (optional alongside Express). The plugin
+registers `@fastify/formbody` internally for urlencoded forms. A runnable demo
+is in `examples/server-fastify.js` — run it with `npm run example:fastify`.
+
+Both adapters serve an identical route set and expose `GET /openapi.json` at
+the mount prefix.
 
 The snippet above assumes `req.session.principalId` is already populated by
 your own auth, which it has nothing to sign a session in with - every

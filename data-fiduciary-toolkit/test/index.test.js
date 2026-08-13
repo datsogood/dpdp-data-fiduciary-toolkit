@@ -5,7 +5,7 @@ const toolkit = require("../src/index");
 
 test("the documented public API is all exported", () => {
   const expected = [
-    "connect", "buildModels", "createRouter",
+    "connect", "buildModels", "createRouter", "createPlugin", "buildOpenApiDocument",
     "persistPIIwithconsent", "withdrawConsent",
     "listRights", "exerciseRight", "getConsentState",
     "complaintToTheBoard", "escalateToBoard", "consentManagerRequest",

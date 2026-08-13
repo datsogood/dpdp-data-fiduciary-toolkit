@@ -1,6 +1,6 @@
 {
   "name": "dpdp-fiduciary-toolkit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reference implementation of Digital Personal Data Protection Act, 2023 data-fiduciary obligations: consent capture, withdrawal, data principal rights, grievance redressal, and consent manager handoff.",
   "main": "src/index.js",
   "license": "Apache-2.0",
@@ -14,22 +14,33 @@
   },
   "files": [
     "src/",
+    "openapi/",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node --test --test-global-setup=scripts/test-setup.js",
-    "example": "node examples/server.js"
+    "example": "node examples/server.js",
+    "example:fastify": "node examples/server-fastify.js",
+    "openapi:generate": "node scripts/generate-openapi.js",
+    "openapi:check": "node scripts/generate-openapi.js --check"
   },
   "peerDependencies": {
-    "express": "^4.19.2 || ^5.0.0"
+    "express": "^4.19.2 || ^5.0.0",
+    "fastify": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "express": { "optional": true },
+    "fastify": { "optional": true }
   },
   "dependencies": {
     "mongoose": "^8.5.0",
     "dotenv": "^16.4.5"
   },
   "devDependencies": {
+    "@fastify/formbody": "^8.0.2",
     "express": "^4.19.2",
+    "fastify": "^5.2.1",
     "mongodb-memory-server": "^10.1.2"
   }
 }
