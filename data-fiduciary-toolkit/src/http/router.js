@@ -12,7 +12,7 @@ const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = requ
 const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
 const { listConsentManagerRequests } = consentManagerRequest;
-const { recordTrail } = require("../services/consentTrail");
+const { getConsentTrail, recordTrail } = require("../services/consentTrail");
 const {
   escapeHtml,
   renderRightsPage,
@@ -251,14 +251,20 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   }
 
   /**
-   * These six routes are the first cacheable responses in the toolkit that
-   * carry personal data - every pre-existing PII route is POST or PUT, and
-   * neither is cacheable by default. GET /consent in particular returns
-   * name, email, phone, dob, PAN and address on a URL with no
-   * user-identifying component, distinguished only by the host's session
-   * cookie: a shared cache or CDN in front of the host, or a browser's disk
-   * or back-forward cache on a shared machine, could otherwise serve one
-   * principal's response to the next.
+   * Applied to every GET below that returns principal-identifying data. These
+   * are the first cacheable responses in the toolkit that carry personal data
+   * - every pre-existing PII route is POST or PUT, and neither is cacheable by
+   * default. GET /consent in particular returns name, email, phone, dob, PAN
+   * and address on a URL with no user-identifying component, distinguished
+   * only by the host's session cookie: a shared cache or CDN in front of the
+   * host, or a browser's disk or back-forward cache on a shared machine, could
+   * otherwise serve one principal's response to the next. GET /consent/trail
+   * is worse still: it is the whole lineage of one person on the same
+   * undistinguished URL.
+   *
+   * The number of routes is deliberately not stated. It said "six" while the
+   * code had seven, and a count in a comment drifts every time a read route is
+   * added.
    */
   function noStore(req, res, next) {
     res.set("Cache-Control", "no-store");
@@ -267,7 +273,8 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   }
 
   /**
-   * Refuses contact details that are not the signed-in principal's own.
+   * The contact fields supplied that are NOT the signed-in principal's own, or
+   * null when everything matches.
    *
    * persistPIIwithconsent resolves a principal through findOrCreatePrincipal,
    * i.e. by contact hash. Passing a caller-supplied email into it would let any
@@ -275,17 +282,21 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
    * again, merely requiring an account. Comparing against the session
    * principal's own stored hash refuses that without a lookup, so it also adds
    * no way to probe which addresses are registered.
+   *
+   * It returns rather than throwing, and is named for what it returns, because
+   * the refusal now also writes a trail entry and that write is asynchronous.
+   * Making an assert-named helper async would leave a synchronous call site
+   * calling it without await, and a returned promise is truthy but never
+   * throws: the 403 would silently stop happening, the write would land on the
+   * victim, and the unhandled rejection would take the process down on every
+   * mismatched request. Keeping the check synchronous and moving both the
+   * write and the throw into the async handler makes that mistake unavailable.
    */
-  function assertOwnContact(principal, pii) {
-    const mismatch =
-      (pii.email && lookupHash(pii.email) !== principal.emailHash) ||
-      (pii.phone && lookupHash(pii.phone) !== principal.phoneHash);
-    if (mismatch) {
-      throw new AppError(
-        "The contact details supplied do not belong to the signed-in data principal. Use the correction route to change them.",
-        403
-      );
-    }
+  function ownContactMismatch(principal, pii) {
+    const fields = [];
+    if (pii.email && lookupHash(pii.email) !== principal.emailHash) fields.push("email");
+    if (pii.phone && lookupHash(pii.phone) !== principal.phoneHash) fields.push("phone");
+    return fields.length ? fields : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -374,7 +385,30 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
         });
         throw new AppError("This data principal's record has been erased and cannot be updated", 409);
       }
-      assertOwnContact(principal, readPii(req.body));
+      const mismatched = ownContactMismatch(principal, readPii(req.body));
+      if (mismatched) {
+        // Awaited, and before the throw. recordTrail is fail-open and never
+        // rejects, so this cannot turn a 403 the caller needs to read into a
+        // 500. Only the NUMBER of mismatched fields is stored: the trail holds
+        // no contact detail, and which field it was does not make the refusal
+        // any more accountable.
+        await recordTrail(models, {
+          principalId: req.principalId,
+          kind: "contact_mismatch_refused",
+          outcome: "refused",
+          reasonCode: "not_own_contact",
+          // principalActor is already at module scope - Task 3 put it there
+          // for exactly this. Re-inlining the object literal would give this
+          // file two definitions of what a principal actor is, and the one
+          // that drifted would be whichever a later reader did not open.
+          actor: principalActor(req),
+          count: mismatched.length,
+        });
+        throw new AppError(
+          "The contact details supplied do not belong to the signed-in data principal. Use the correction route to change them.",
+          403
+        );
+      }
 
       const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
       const result = await persistPIIwithconsent({
@@ -408,6 +442,11 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       principalId: req.principalId,
       consentTypes: asArray(req.body.consentTypes),
       onWithdrawal,
+      // The service defaults to UNATTRIBUTED, which is the honest answer for a
+      // direct library call and the wrong one here: this request arrived with a
+      // session, on a surface we can name. Same helper as every other
+      // principal-facing site in this file.
+      actor: principalActor(req),
     });
     // Same reasoning as the consent receipt above: withdrawal must be as easy
     // as granting, so a browser gets a page, not a JSON blob, and the same
@@ -452,6 +491,36 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
     noStore,
     wrap(async (req, res) => {
       const result = await getConsentState({ models, principalId: req.principalId });
+      res.status(200).json(result);
+    })
+  );
+
+  /**
+   * The Section 11 lineage view, and the headline of the audit-trail feature.
+   * Merges what the toolkit recorded about this principal with the events it
+   * can derive from the primary collections, newest first. Scoped to
+   * req.principalId only, so this can never read another principal's trail.
+   *
+   * includeOperatorRefs: false withholds actor.ref and caseRef. This read
+   * deliberately DOES include the back-office access rows, so a data principal
+   * can see that their record was looked at - but who looked is the adopter's
+   * own employee's personal data, retained under the adopter's employment
+   * basis, and the ticket reference is the adopter's internal case data.
+   * Neither is the data principal's to receive.
+   *
+   * The read itself is not recorded. Logging a principal's own access would
+   * make the right of access a write path and change its cost profile.
+   */
+  router.get(
+    "/consent/trail",
+    requireAuth,
+    noStore,
+    wrap(async (req, res) => {
+      const result = await getConsentTrail({
+        models,
+        principalId: req.principalId,
+        includeOperatorRefs: false,
+      });
       res.status(200).json(result);
     })
   );
@@ -560,6 +629,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
         models,
         refId: req.params.refId,
         principalId: req.principalId,
+        actor: principalActor(req),
       });
       res.status(200).json(result);
     })

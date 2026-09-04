@@ -307,3 +307,141 @@ test("GET /rights/requests/:refId and GET /grievances/:refId are 404 for a synta
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// GET /consent/trail - the Section 11 lineage view
+// ---------------------------------------------------------------------------
+
+test("GET /consent/trail returns the session principal's own lineage, uncacheable, with operator refs withheld", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { recordTrail, getConsentTrail } = require("../src/services/consentTrail");
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    // A back-office read of this principal's record, written BEFORE the
+    // request. Without it this principal has only just signed up, the timeline
+    // holds nothing but derived ledger entries, and NOTHING IN IT COULD CARRY
+    // an actor.ref or a caseRef - so every withholding assertion below would
+    // pass without the withholding ever running. This row is the only entry in
+    // the fixture that has something to withhold.
+    await recordTrail(models, {
+      principalId,
+      kind: "operator_trail_read",
+      outcome: "recorded",
+      actor: { role: "operator", ref: "emp-10432", channel: "api" },
+      caseRef: "INC-0042199",
+    });
+
+    const asPrincipal = await bootApp(conn, principalId);
+    try {
+      const res = await asPrincipal.call("GET", "/consent/trail");
+      assert.equal(res.status, 200);
+      assert.equal(
+        res.headers.get("cache-control"), "no-store",
+        "the trail names every act taken about one person - a shared cache or CDN must never be told it may store it"
+      );
+      assert.equal(
+        res.headers.get("vary"), "Cookie",
+        "the URL carries no identifying component - only the session cookie distinguishes one principal's trail from another's"
+      );
+
+      const body = await res.json();
+      assert.equal(body.principalId, principalId);
+      assert.equal(
+        body.coverageFrom, "2026-09-04",
+        "a trail with nothing in it must say we were not recording before this date, never imply nothing happened"
+      );
+      assert.equal(body.truncated, false);
+      assert.equal(typeof body.totalEntries, "number");
+      assert.ok(Array.isArray(body.timeline));
+      assert.ok(body.timeline.length > 0, "signing up is itself lineage - a fresh principal's trail is not empty");
+
+      for (const entry of body.timeline) {
+        assert.ok(entry.at, "every timeline entry carries an observed timestamp, stored or derived");
+        assert.ok(entry.kind, "every timeline entry names what happened");
+        assert.ok(
+          entry.source === "stored" || entry.source === "derived",
+          "a consumer must be able to tell a recorded fact from a derived one without branching on shape"
+        );
+        assert.ok(entry.actor && entry.actor.role && entry.actor.channel);
+        assert.equal(
+          entry.actor.ref, undefined,
+          "a data principal may learn that a member of staff read their record, never which one - actor.ref is the adopter's own employee's personal data, held under a different basis"
+        );
+        assert.equal(
+          entry.caseRef, undefined,
+          "the adopter's own ticket reference is back-office data and is never rendered back to a data principal"
+        );
+      }
+
+      // The row that makes the loop above mean something. It must be PRESENT -
+      // withholding is not the same as hiding, and that a member of staff read
+      // their record is precisely what a data principal is owed under Section
+      // 11 - and it must arrive stripped.
+      const looked = body.timeline.find((e) => e.kind === "operator_trail_read");
+      assert.ok(
+        looked,
+        "the back-office access row is included, not filtered out - the headline of this feature is that a person can see they were looked at"
+      );
+      assert.equal(looked.source, "stored");
+      assert.deepEqual(
+        looked.actor, { role: "operator", channel: "api" },
+        "role and channel survive, ref does not - the principal learns that staff read the record, never which member of staff"
+      );
+      assert.equal(Object.hasOwn(looked.actor, "ref"), false, "absent, not null - a null ref is still a field where an employee's id used to be");
+      assert.equal(Object.hasOwn(looked, "caseRef"), false, "the ticket reference never leaves the back office");
+    } finally {
+      await asPrincipal.close();
+    }
+
+    // The inverse, so the two assertions above cannot pass because the read
+    // simply never carried either field. The same row, read the way the back
+    // office reads it, has both.
+    const backOffice = await getConsentTrail({ models, principalId, includeOperatorRefs: true });
+    const seen = backOffice.timeline.find((e) => e.kind === "operator_trail_read");
+    assert.deepEqual(
+      seen.actor, { role: "operator", ref: "emp-10432", channel: "api" },
+      "includeOperatorRefs: true is the whole difference between the two reads - if this is stripped too, the route above is withholding nothing"
+    );
+    assert.equal(
+      seen.caseRef, "INC-0042199",
+      "who and why together is what makes an access record accountability rather than a counter"
+    );
+  });
+});
+
+test("GET /consent/trail is scoped to the session - a principalId in the query string is ignored", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId: a } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    const { principalId: b } = await persistPIIwithconsent({
+      models,
+      pii: { name: "Bhim", email: "bhim@example.com", phone: "9000000000", dob: "1985-02-02" },
+      consentTypes: ["analytics"],
+    });
+
+    let bRefId;
+    const asB = await bootApp(conn, b);
+    try {
+      const filed = await asB.call("POST", "/rights/exercise", { right: "access" });
+      assert.equal(filed.status, 201);
+      ({ refId: bRefId } = await filed.json());
+    } finally {
+      await asB.close();
+    }
+
+    const asA = await bootApp(conn, a);
+    try {
+      const res = await asA.call("GET", `/consent/trail?principalId=${b}`);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.principalId, a, "the query string must never override the authenticated session");
+      assert.equal(
+        body.timeline.some((e) => e.refId === bRefId), false,
+        "another principal's rights request must not appear in this trail - the scope is req.principalId and nothing else"
+      );
+    } finally {
+      await asA.close();
+    }
+  });
+});

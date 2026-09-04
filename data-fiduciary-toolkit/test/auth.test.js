@@ -584,3 +584,177 @@ test("a mongoose cast failure is a 400 naming the field, not a 500 and not the r
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// The assertOwnContact 403, recorded
+//
+// The refusal used to be a throw and nothing else. It is the C1 attack made by
+// someone who already has an account, and until now it left no trace anywhere.
+// ---------------------------------------------------------------------------
+
+test("a PUT /consent naming another principal's email is still refused 403, and the refusal is recorded", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+    const { principalId: asha } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    const { principalId: bhim } = await persistPIIwithconsent({
+      models,
+      pii: { name: "Bhim", email: "bhim@example.com", phone: "9000000000", dob: "1985-02-02" },
+      consentTypes: ["analytics"],
+    });
+
+    const { call, close } = await app(conn, { resolvePrincipal: () => bhim });
+    try {
+      const attack = await call("PUT", "/consent", {
+        pii: { name: "Bhim", email: "asha@example.com", phone: "9000000000", dob: "1985-02-02" },
+        consentTypes: [],
+      });
+      assert.equal(
+        attack.status, 403,
+        "the mismatch check must stay synchronous - an unawaited async check returns a truthy promise that never throws, so the 403 would silently stop happening and the write would land on the victim"
+      );
+    } finally {
+      await close();
+    }
+
+    const rows = await models.TrailEntry.find({ kind: "contact_mismatch_refused" }).lean();
+    assert.equal(rows.length, 1, "one refused attempt, one row - the throw must not skip the write that precedes it");
+    assert.equal(
+      rows[0].principalId, bhim,
+      "the row is filed against the account that made the attempt, never against the person it targeted - filing it under the victim would let an attacker append to someone else's trail"
+    );
+    assert.equal(rows[0].outcome, "refused");
+    assert.equal(rows[0].reasonCode, "not_own_contact");
+    assert.equal(rows[0].actor.role, "principal");
+    assert.equal(rows[0].actor.channel, "api");
+    assert.equal(rows[0].count, 1, "exactly one contact field mismatched - the email");
+    assert.equal(rows[0].actor.ref, undefined, "actor.ref is set only for an operator");
+    assert.equal(
+      JSON.stringify(rows[0]).includes("asha@example.com"), false,
+      "the trail stores no contact detail, so a refusal can never become a record of which address was targeted"
+    );
+
+    const victim = await models.Principal.findOne({ principalId: asha }).lean();
+    assert.equal(victim.pii.name, "Asha", "the victim's PII must be untouched");
+  });
+});
+
+test("the contact-mismatch refusal records the channel the data principal was actually on", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+    await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    const { principalId: bhim } = await persistPIIwithconsent({
+      models,
+      pii: { name: "Bhim", email: "bhim@example.com", phone: "9000000000", dob: "1985-02-02" },
+      consentTypes: ["analytics"],
+    });
+
+    const { call, close } = await app(conn, { resolvePrincipal: () => bhim });
+    try {
+      const attack = await call(
+        "PUT",
+        "/consent",
+        {
+          pii: { name: "Bhim", email: "asha@example.com", phone: "9000000000", dob: "1985-02-02" },
+          consentTypes: [],
+        },
+        { Accept: "text/html" }
+      );
+      assert.equal(attack.status, 403);
+      assert.match(attack.headers.get("content-type"), /text\/html/, "a browser is answered the reason as a page");
+    } finally {
+      await close();
+    }
+
+    const rows = await models.TrailEntry.find({ kind: "contact_mismatch_refused" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(
+      rows[0].actor.channel, "html",
+      "the actor's channel is the one the request negotiated, so a form submission and an API call are distinguishable in the record"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two router call sites that had an actor parameter and no actor
+//
+// Both branches under test save nothing: withdrawConsent skips save() when
+// nothing changed, and escalateToBoard's SLA guard throws before it touches
+// the grievance. The trail row is the whole record, so an `unattributed` one
+// is a record of nobody having done nothing.
+// ---------------------------------------------------------------------------
+
+test("a withdrawal refused through the ROUTE is attributed to the data principal and to the surface they used", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    const { call, close } = await app(conn, { resolvePrincipal: () => principalId });
+    try {
+      // kyc_reporting rests on Section 7(d), not on consent, so the service
+      // refuses it and skips the ledger write entirely. Accept: text/html so
+      // the channel asserted below is one the request actually negotiated -
+      // a hardcoded actor could not produce it.
+      const res = await call(
+        "PUT",
+        "/consent/withdraw",
+        { consentTypes: ["kyc_reporting"] },
+        { Accept: "text/html" }
+      );
+      assert.equal(res.status, 200, "a purpose that cannot be withdrawn is reported in the receipt, not as an error status");
+    } finally {
+      await close();
+    }
+
+    const rows = await models.TrailEntry.find({ kind: "withdrawal_not_applied" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].reasonCode, "not_withdrawable");
+    assert.equal(rows[0].principalId, principalId);
+    assert.equal(
+      rows[0].actor.role, "principal",
+      "the request carried a session, so `unattributed` here means the route never passed the actor the service was given a parameter for"
+    );
+    assert.equal(
+      rows[0].actor.channel, "html",
+      "html, not library - the channel is negotiated per request, so this can only pass if principalActor(req) reached the service"
+    );
+  });
+});
+
+test("an escalation refused through the ROUTE names the person who was stopped from reaching the Board", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    const { call, close } = await app(conn, { resolvePrincipal: () => principalId });
+    try {
+      const filed = await call("POST", "/grievance", {
+        subject: "No answer",
+        description: "I asked twice and heard nothing.",
+      });
+      assert.equal(filed.status, 201);
+      const { refId } = await filed.json();
+
+      // Filed a moment ago, so the Grievance Officer's SLA has not lapsed and
+      // escalateToBoard refuses. That branch saves nothing at all - the 409
+      // and this row are its entire output.
+      const res = await call("POST", `/grievance/${refId}/escalate`, {});
+      assert.equal(res.status, 409, "setup check - the SLA guard must actually have refused");
+    } finally {
+      await close();
+    }
+
+    const rows = await models.TrailEntry.find({ kind: "escalation_refused" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].reasonCode, "sla_not_lapsed");
+    assert.equal(rows[0].principalId, principalId);
+    assert.equal(
+      rows[0].actor.role, "principal",
+      "a data principal was turned back from the Board - a row saying `unattributed` answers nobody's question about who was turned back"
+    );
+    assert.equal(rows[0].actor.channel, "api");
+  });
+});
