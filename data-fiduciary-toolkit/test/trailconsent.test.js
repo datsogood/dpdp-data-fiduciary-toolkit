@@ -11,6 +11,7 @@ const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
 const withdrawConsent = require("../src/services/withdrawConsent");
 const { erasePrincipalPII } = require("../src/services/erasure");
 const { buildNotice } = require("../src/config/notice");
+const { findOrCreatePrincipal } = require("../src/utils/principalId");
 
 const PII = { name: "Asha", email: "asha@example.com", phone: "9876543210", dob: "1990-04-01" };
 
@@ -465,5 +466,78 @@ test("twenty duplicate-signup 409s grow the victim's trail by exactly zero - rec
     const stored = await models.Principal.findOne({ principalId: victim.principalId });
     assert.equal(stored.pii.name, PII.name,
       "the existence check also still runs before any write, so twenty attempts overwrote nothing - this is the C1 attack the route's own comment describes");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The E11000 recovery branch (review finding): decideFor runs a second time
+// against the winning document, and the instrumentation block sits after the
+// whole try/catch closes so it fires once regardless of which branch ran. A
+// row per decideFor call, rather than per submission, would double every
+// refusal on this path - and nothing above this file forces the collision, so
+// nothing above would have caught it.
+// ---------------------------------------------------------------------------
+
+test("a trail row on the E11000 recovery path is written once, not once per decideFor call - the recomputed refusal is not a second refusal", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const childPii = { name: "Child", email: "child-collision@example.com", phone: "4", dob: minorDob() };
+
+    // Seed a real ledger for this principal so the forced-miss collision
+    // below has a genuine winning document to collide with. This seed call
+    // is itself a minor submission, so - like every minor submission - it
+    // also writes its own consent_refused row for marketing/analytics; that
+    // row is expected and is not what this test measures. What is measured
+    // below is filtered by the SECOND call's own receiptId, so the seed's
+    // row cannot hide a duplicate or be mistaken for one.
+    const seed = await persistPIIwithconsent({
+      models, pii: childPii, consentTypes: ["underwriting"], parentalConsent: PARENT,
+    });
+    const principalId = seed.principalId;
+
+    // Force the losing interleaving deterministically, the same way
+    // test/consent.test.js's "create-race recovery" test does: the next
+    // submission's read misses the record that is really there, so its
+    // insert collides on the unique principalId index and the recovery path
+    // - not the happy path - is the only way through. That means decideFor
+    // runs TWICE for this one call: once against the empty state the missed
+    // read implies, once again in the catch against the re-read winner.
+    // prohibited_for_child does not depend on ledger state at all, so both
+    // calls compute the identical refusal - which is exactly why a write
+    // site duplicated across the two decideFor call sites would be
+    // invisible in its DATA and visible only in its COUNT.
+    const realFindOne = models.ConsentRecord.findOne.bind(models.ConsentRecord);
+    let forcedMisses = 0;
+    models.ConsentRecord.findOne = (...args) => {
+      if (forcedMisses === 0) {
+        forcedMisses += 1;
+        return Promise.resolve(null);
+      }
+      return realFindOne(...args);
+    };
+    let result;
+    try {
+      result = await persistPIIwithconsent({
+        models,
+        principalId,
+        pii: childPii,
+        consentTypes: ["marketing", "analytics"],
+      });
+    } finally {
+      models.ConsentRecord.findOne = realFindOne;
+    }
+
+    assert.equal(forcedMisses, 1, "the forced miss must have been consumed, or no collision was provoked");
+    assert.deepEqual([...result.refusedForChild].sort(), ["analytics", "marketing"],
+      "setup check - the recovery must actually have recomputed a refusal, or this test proves nothing");
+    assert.equal(await models.ConsentRecord.countDocuments({ principalId }), 1,
+      "the unique index is the backstop - one ledger survives, whichever attempt won");
+
+    // Filtered by THIS call's receiptId, not just principalId, so the seed's
+    // own (expected, separate) refusal row cannot be mistaken for one of
+    // these or hide a real duplicate among them.
+    const rows = await models.TrailEntry.find({ kind: "consent_refused", receiptId: result.receiptId });
+    assert.equal(rows.length, 1,
+      "decideFor ran twice on this call, and the refusal it reports is identical both times - a write site attached to either call individually would double this row, and a state-independent kind like this one would not show up as wrong data, only as a wrong count");
   });
 });
