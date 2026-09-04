@@ -575,7 +575,7 @@ Expected: PASS, `ℹ pass 6` / `ℹ fail 0`.
 
 Run: `npm test`
 
-Expected: `ℹ pass 166` / `ℹ fail 0`. The suite is 158 tests before this task; the two `assertOpaqueRef` tests and the six trail tests take it to 166. No existing test needs updating. In particular:
+Expected: `ℹ pass 168` / `ℹ fail 0`. `npm test` reports 160 before this task; the two `assertOpaqueRef` tests and the six trail tests take it to 168. Trust `npm test`'s own total, not a per-file count: verified during execution, `npm test` reports two MORE than the sum of the per-file runs, so a count derived by summing files is 2 low. No existing test needs updating. In particular:
 
 - `test/connection.test.js:62-63` asserts `!mongoose.models.ConsentRecord` - adding a model to the registry does not touch the global mongoose registry, because every model is built with `connection.model(...)`, never `mongoose.model(...)`.
 - `test/children.test.js:83` and `:113` assert `ConsentRecord.countDocuments() === 0`. Those count a different collection, and nothing in this task writes any document at runtime - `trailentries` is created lazily on the first insert, which no shipped code performs until Task 2.
@@ -1039,7 +1039,7 @@ Expected: PASS - `ℹ tests 15`, `ℹ pass 15`, `ℹ fail 0`.
 - [ ] **Step 10: Run the whole suite**
 
 Run: `npm test`
-Expected: `ℹ pass 175`, `ℹ fail 0` - 166 after Task 1, plus the nine this task adds. No existing test needs updating: this task adds a new file that nothing else requires yet - no service calls `recordTrail` until Task 3 - so the `trailentries` collection is still written only by `test/trail.test.js` itself. In particular the `countDocuments` guards in `test/children.test.js:83` and `:113` count `ConsentRecord`, not this collection, and are untouched.
+Expected: `ℹ pass 177`, `ℹ fail 0` - 168 after Task 1, plus the nine this task adds. No existing test needs updating: this task adds a new file that nothing else requires yet - no service calls `recordTrail` until Task 3 - so the `trailentries` collection is still written only by `test/trail.test.js` itself. In particular the `countDocuments` guards in `test/children.test.js:83` and `:113` count `ConsentRecord`, not this collection, and are untouched.
 
 - [ ] **Step 11: Commit**
 
@@ -1936,7 +1936,7 @@ Expected: PASS - all twelve tests. If either of these two ever fails, the failur
 
 Run: `npm test`
 
-Expected: `ℹ pass 187`, `ℹ fail 0` - the 175 tests standing after Task 2 all still pass, unchanged, plus the 12 this task adds. Nothing in `test/consent.test.js`, `test/auth.test.js`, `test/notice.test.js`, `test/http.test.js`, `test/erasure.test.js` or `test/injection.test.js` needs updating: every write this task adds goes to `trailentries`, and the ledger, `currentState()`, `getConsentState`'s projection and the returned object are all untouched. `test/children.test.js:82` and `:112` assert `Principal.countDocuments() === 0`, and `:83` and `:113` assert `ConsentRecord.countDocuments() === 0`, after a rejected minor - and all four still hold - the age-gate row is in a third collection those assertions do not look at.
+Expected: `ℹ pass 189`, `ℹ fail 0` - the 177 tests standing after Task 2 all still pass, unchanged, plus the 12 this task adds. Nothing in `test/consent.test.js`, `test/auth.test.js`, `test/notice.test.js`, `test/http.test.js`, `test/erasure.test.js` or `test/injection.test.js` needs updating: every write this task adds goes to `trailentries`, and the ledger, `currentState()`, `getConsentState`'s projection and the returned object are all untouched. `test/children.test.js:82` and `:112` assert `Principal.countDocuments() === 0`, and `:83` and `:113` assert `ConsentRecord.countDocuments() === 0`, after a rejected minor - and all four still hold - the age-gate row is in a third collection those assertions do not look at.
 
 If `test/consent.test.js` moves, the regression test in Step 2 has already told you which of the ledger or the return value changed - fix that, do not update those tests.
 
@@ -5977,7 +5977,7 @@ Expected: PASS - 12 tests, the whole of this file: 2 construction guards, 3 oper
 
 Run: `npm test`
 
-Expected: `ℹ pass 234` / `ℹ fail 0`. The arithmetic, so a mismatch tells you which task drifted rather than only that something did: 158 at HEAD, plus 8 from Task 1, 9 from Task 2, 12 from Task 3, 14 from Task 4, 13 from Task 5, 6 from Task 6 and 2 from Task 7 is 222 going in; the 12 in `test/backoffice.test.js` take it to 234. Each figure is the per-file gate that task's own final step states - if one is off, that task drifted. Nothing here touches `createRouter`, the consent ledger, or any existing service, so no existing test needs updating. `test/index.test.js` is untouched by this task - `createBackOfficeRouter` is exported in Task 9, and until then the new file is reachable only by direct require.
+Expected: `ℹ pass 236` / `ℹ fail 0`. The arithmetic, so a mismatch tells you which task drifted rather than only that something did: 160 at HEAD, plus 8 from Task 1, 9 from Task 2, 12 from Task 3, 14 from Task 4, 13 from Task 5, 6 from Task 6 and 2 from Task 7 is 224 going in; the 12 in `test/backoffice.test.js` take it to 236. Each figure is the per-file gate that task's own final step states - if one is off, that task drifted. Nothing here touches `createRouter`, the consent ledger, or any existing service, so no existing test needs updating. `test/index.test.js` is untouched by this task - `createBackOfficeRouter` is exported in Task 9, and until then the new file is reachable only by direct require.
 
 - [ ] **Step 14: Commit**
 
