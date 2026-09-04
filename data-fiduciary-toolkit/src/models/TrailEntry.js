@@ -64,11 +64,6 @@ const KINDS = [
 
 const REASON_CODES = [
   "regrant_not_requested",
-  // No task in this plan emits this one. It is the vocabulary for a future
-  // caller that wants to record a submission which asked for the state a
-  // purpose is already in - today `decide()` returns null for that and the
-  // act is indistinguishable from no submission at all.
-  "already_in_state",
   "prohibited_for_child",
   // Written by withdrawal_not_applied only (Task 4). The spec's kind table also
   // pairs it with consent_refused, but that pair is deliberately never written:
@@ -122,6 +117,10 @@ const trailEntrySchema = new Schema({
   // The transition requestLifecycle overwrites in place. updatedAt holds only
   // the last change, so a status that moved received -> in_progress -> closed
   // has its middle transition destroyed unless it is stored here.
+  //
+  // contact_corrected is the one kind that is not a lifecycle transition: it
+  // reuses toStatus to name which contact field changed ("email", "phone" or
+  // "email+phone", never a value or a hash of one) and never sets fromStatus.
   fromStatus: { type: String },
   toStatus: { type: String },
   // Collapsed refusals: one row per (kind, reasonCode) per call. Without it a
