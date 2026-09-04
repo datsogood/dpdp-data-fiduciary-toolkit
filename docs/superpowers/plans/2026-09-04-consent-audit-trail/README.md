@@ -24,14 +24,14 @@ The toolkit can answer "what did this person end up consenting to". It cannot an
 
 ## Status
 
-Design complete and adversarially reviewed. Plan not yet written.
+Design and plan complete, both adversarially reviewed. Execution not started.
 
 | Stage | State |
 | --- | --- |
 | Design | done - `spec.md` |
-| Design review | done - three adversarial lenses (DPDP fidelity, security, simplicity), then a second pass against the written spec |
-| Plan | pending |
-| Plan review | pending |
+| Design review | done - three adversarial lenses against the design inputs, then five against the written spec with independent verification of every blocker and major |
+| Plan | done - `plan.md`, 9 tasks, 134 steps |
+| Plan review | done - two checkers, two revision rounds, 41 findings applied |
 | Build | pending |
 | Code review | pending |
 | ADR | pending |
