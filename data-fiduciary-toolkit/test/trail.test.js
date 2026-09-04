@@ -5,6 +5,7 @@ const { withDb } = require("./helpers/db");
 
 process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
+const { recordTrail, recordTrailStrict, COVERAGE_FROM } = require("../src/services/consentTrail");
 
 const PID = "a".repeat(64);
 
@@ -141,5 +142,228 @@ test("buildModels exposes TrailEntry on the given connection and leaves the glob
     assert.ok(models.TrailEntry, "a service reaches this model only through the registry - it never requires the file");
     assert.equal(models.TrailEntry.db, conn, "the model must be bound to the caller's connection, not a global one");
     assert.ok(!mongoose.models.TrailEntry, "global mongoose registry must stay clean");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The trail writer (spec sections 5, 6 and 8.2)
+// ---------------------------------------------------------------------------
+
+test("recordTrail writes one row and defaults the actor to unattributed", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    await recordTrail(models, {
+      principalId: PID,
+      kind: "consent_not_applied",
+      outcome: "no_change",
+      reasonCode: "regrant_not_requested",
+      receiptId: "RC-ABC123",
+      count: 1,
+    });
+
+    const rows = await models.TrailEntry.find({ principalId: PID }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].kind, "consent_not_applied");
+    assert.equal(rows[0].outcome, "no_change");
+    assert.equal(rows[0].reasonCode, "regrant_not_requested");
+    assert.equal(rows[0].receiptId, "RC-ABC123");
+    assert.equal(rows[0].count, 1);
+    assert.ok(rows[0].at instanceof Date);
+    assert.deepEqual(
+      rows[0].actor,
+      { role: "unattributed", channel: "library" },
+      "a caller that names no actor gets `unattributed` - the library does not know who acted, and `system` would be a claim it cannot back"
+    );
+  });
+});
+
+test("COVERAGE_FROM is a plain date string, so an empty trail can say when recording began", () => {
+  assert.match(COVERAGE_FROM, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("recordTrail keeps a catalog-valid consent type and drops everything else", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    await recordTrail(models, {
+      principalId: PID,
+      kind: "withdrawal_not_applied",
+      outcome: "refused",
+      reasonCode: "unknown_consent_type",
+      // withdrawConsent.js:45-48 pushes caller-supplied text verbatim and
+      // assertStringArray applies no content check, so an email typed into
+      // consentTypes reaches this writer.
+      consentTypes: ["marketing", "asha@example.com"],
+      count: 2,
+    });
+
+    const rows = await models.TrailEntry.find({}).lean();
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].consentTypes, ["marketing"], "a catalog-valid purpose survives");
+    assert.doesNotMatch(
+      JSON.stringify(rows),
+      /asha@example\.com/,
+      "the trail survives erasure, so caller-supplied text must never reach any field of it"
+    );
+    assert.equal(rows[0].count, 2, "count still reports what the call actually covered");
+  });
+});
+
+test("recordTrail omits consentTypes entirely when nothing survives the catalog filter", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    await recordTrail(models, {
+      principalId: PID,
+      kind: "withdrawal_not_applied",
+      outcome: "refused",
+      reasonCode: "unknown_consent_type",
+      consentTypes: ["asha@example.com"],
+      count: 1,
+    });
+
+    const raw = await models.TrailEntry.findOne({ principalId: PID }).lean();
+    assert.equal(
+      Object.hasOwn(raw, "consentTypes"),
+      false,
+      "an empty array would read as `the call named no purposes`, which is false - it named one this writer refused to store"
+    );
+    assert.equal(raw.count, 1, "the row is still written: something was refused and that fact survives nowhere else");
+  });
+});
+
+test("recordTrail refuses a caseRef and an actor.ref that are not opaque references", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const savedError = console.error;
+    console.error = () => {};
+    try {
+      await recordTrail(models, {
+        kind: "operator_lookup",
+        outcome: "recorded",
+        reasonCode: "no_match",
+        actor: { role: "operator", ref: "emp-10432", channel: "api" },
+        caseRef: "asha@example.com",
+      });
+      await recordTrail(models, {
+        kind: "operator_lookup",
+        outcome: "recorded",
+        reasonCode: "no_match",
+        actor: { role: "operator", ref: "asha nair", channel: "api" },
+        caseRef: "INC-0042199",
+      });
+    } finally {
+      console.error = savedError;
+    }
+
+    assert.equal(
+      await models.TrailEntry.countDocuments({}),
+      0,
+      "a row is dropped rather than written with contact details or free text in it"
+    );
+  });
+});
+
+test("a failed trail write never reaches the caller, and the log names err.name and err.code but never err.message", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const savedCreate = models.TrailEntry.create;
+    const savedError = console.error;
+    const logged = [];
+    console.error = (...args) => logged.push(args);
+    // The patch lives on a model bound to this test's throwaway connection,
+    // so it cannot leak into another test.
+    const boom = Object.assign(new Error('E11000 duplicate key error: { caseRef: "INC-0042199" }'), {
+      name: "MongoServerError",
+      code: 11000,
+    });
+    models.TrailEntry.create = () => Promise.reject(boom);
+    try {
+      await recordTrail(models, {
+        principalId: PID,
+        kind: "age_gate_refused",
+        outcome: "refused",
+        reasonCode: "parental_consent_required",
+      });
+    } finally {
+      models.TrailEntry.create = savedCreate;
+      console.error = savedError;
+    }
+
+    assert.equal(logged.length, 1, "a lost row must still be visible to whoever runs the deployment");
+    const line = JSON.stringify(logged[0]);
+    assert.match(line, /MongoServerError/, "err.name says what class of failure it was");
+    assert.match(line, /11000/, "err.code says which one");
+    assert.doesNotMatch(
+      line,
+      /INC-0042199/,
+      "err.message quotes the offending value back, which is how a caller-supplied value reaches a log - the same discipline as the router's error mapper"
+    );
+  });
+});
+
+test("recordTrailStrict turns the same failure into a 503, so a disclosure without a record cannot happen", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const savedCreate = models.TrailEntry.create;
+    const savedError = console.error;
+    console.error = () => {};
+    models.TrailEntry.create = () => Promise.reject(Object.assign(new Error("no primary"), { name: "MongoServerError", code: 189 }));
+    try {
+      await assert.rejects(
+        () =>
+          recordTrailStrict(models, {
+            principalId: PID,
+            kind: "operator_trail_read",
+            outcome: "recorded",
+            actor: { role: "operator", ref: "emp-10432", channel: "api" },
+            caseRef: "INC-0042199",
+          }),
+        (err) => err.status === 503,
+        "no record, no disclosure - an unaudited people-search is worse than no people-search"
+      );
+    } finally {
+      models.TrailEntry.create = savedCreate;
+      console.error = savedError;
+    }
+  });
+});
+
+test("recordTrailStrict rejects a bad caseRef as a 400, not a 503 - that is the caller's mistake, not an outage", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    await assert.rejects(
+      () =>
+        recordTrailStrict(models, {
+          kind: "operator_lookup",
+          outcome: "recorded",
+          reasonCode: "no_match",
+          actor: { role: "operator", ref: "emp-10432", channel: "api" },
+          caseRef: "ticket for asha@example.com",
+        }),
+      (err) => err.status === 400,
+      "a 503 would tell an operator the database is down when their own payload is the problem"
+    );
+    assert.equal(await models.TrailEntry.countDocuments({}), 0);
+  });
+});
+
+test("recordTrailStrict writes the access record, and a lookup that matched nobody stores no subject", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    await recordTrailStrict(models, {
+      kind: "operator_lookup",
+      outcome: "recorded",
+      reasonCode: "no_match",
+      actor: { role: "operator", ref: "emp-10432", channel: "api" },
+      caseRef: "INC-0042199",
+    });
+
+    const raw = await models.TrailEntry.findOne({ kind: "operator_lookup" }).lean();
+    assert.deepEqual(raw.actor, { role: "operator", ref: "emp-10432", channel: "api" });
+    assert.equal(raw.caseRef, "INC-0042199");
+    assert.equal(
+      Object.hasOwn(raw, "principalId"),
+      false,
+      "a miss must not manufacture a subject - there is no principal to file it under"
+    );
   });
 });
