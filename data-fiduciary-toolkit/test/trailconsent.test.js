@@ -253,3 +253,217 @@ test("instrumenting the write path changes neither the ledger nor the returned o
       "an adult granting consent destroys nothing, so under the partition rule it writes no trail row at all");
   });
 });
+
+// ---------------------------------------------------------------------------
+// consent_refused / record_erased - PUT /consent, thrown before any write
+// ---------------------------------------------------------------------------
+
+test("a consent update refused because the record is erased leaves a refusal row - erasure is terminal, so this is the last thing that will ever happen on the record and nothing else writes it down", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    await erasePrincipalPII({ models, principalId });
+
+    const app = express();
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => principalId }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      const res = await fetch(`http://localhost:${port}/dpdp/consent`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ consentTypes: ["analytics"] }),
+      });
+      assert.equal(res.status, 409, "setup check - the erased guard must actually have refused");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+
+    const rows = await models.TrailEntry.find({ kind: "consent_refused", reasonCode: "record_erased" });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcome, "refused");
+    assert.equal(rows[0].principalId, principalId);
+    assert.equal(rows[0].actor.role, "principal");
+    assert.equal(rows[0].actor.channel, "api",
+      "identity comes from the session, and the channel is what an API client asked for");
+  });
+});
+
+test("the channel a refusal arrived on is recorded, so a browser form and an API client are told apart", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const app = express();
+    // Signup is deliberately unauthenticated, so no resolvePrincipal is needed
+    // to reach POST /consent.
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => null }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      const res = await fetch(`http://localhost:${port}/dpdp/consent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/html" },
+        body: new URLSearchParams({
+          name: "Child",
+          email: "form-child@example.com",
+          dob: minorDob(),
+          consentSubmitted: "1",
+        }),
+      });
+      assert.equal(res.status, 422, "setup check - the age gate must actually have refused");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+
+    const rows = await models.TrailEntry.find({ kind: "age_gate_refused" });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].actor.role, "principal");
+    assert.equal(rows[0].actor.channel, "html");
+    assert.equal(rows[0].principalId, undefined,
+      "signup still has no subject, however the refusal arrived");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The failure policy (section 8.2): instrumentation writes fail OPEN
+// ---------------------------------------------------------------------------
+
+test("a trail write that fails does not fail the act it is instrumenting - the minor still gets the 422 that explains why", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    // Any property lookup on TrailEntry throws, so recordTrail fails however
+    // it chose to write - create, save, insertMany. That is deliberate: this
+    // asserts the CONTRACT ("never throws") rather than one implementation of
+    // it, which also means recordTrail's whole body has to sit inside its
+    // try/catch, not just the await.
+    const broken = {
+      ...models,
+      TrailEntry: new Proxy({}, { get() { throw new Error("trail collection is down"); } }),
+    };
+
+    await assert.rejects(
+      () =>
+        persistPIIwithconsent({
+          models: broken,
+          pii: { name: "Child", email: "failopen@example.com", phone: "9", dob: minorDob() },
+          consentTypes: ["marketing"],
+        }),
+      (e) => e.status === 422 && /parental consent/i.test(e.message)
+    );
+
+    assert.equal(await models.TrailEntry.countDocuments(), 0,
+      "the write really did fail - otherwise this test passes vacuously");
+  });
+});
+
+test("a trail write that fails does not fail a SUCCESSFUL consent submission either - the receipt is still returned in full", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const a = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing", "underwriting"] });
+
+    const broken = {
+      ...models,
+      TrailEntry: new Proxy({}, { get() { throw new Error("trail collection is down"); } }),
+    };
+    // Omitting marketing withdraws it, which is the path that writes a
+    // withdrawal_hook_not_fired row after the save.
+    const b = await persistPIIwithconsent({
+      models: broken,
+      principalId: a.principalId,
+      pii: PII,
+      consentTypes: ["underwriting"],
+    });
+
+    assert.deepEqual(b.events.map((e) => `${e.type}:${e.status}`), ["marketing:withdrawn"],
+      "the ledger append must have happened and been reported, trail or no trail");
+    assert.ok(b.receiptId);
+    const record = await models.ConsentRecord.findOne({ principalId: a.principalId });
+    assert.equal(record.events.filter((e) => e.status === "withdrawn").length, 1);
+    assert.equal(await models.TrailEntry.countDocuments(), 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The exclusions (section 7). These are not gaps - each one is a write an
+// attacker would otherwise control, and a test is the only thing that keeps
+// them cut.
+// ---------------------------------------------------------------------------
+
+test("GET /consent/new grows the trail by exactly zero - it is the one deliberately unauthenticated, checkOrigin-exempt page, so a row here would make a cross-site <img> a database write", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const app = express();
+    // No session: this page is reachable with no principal at all, which is
+    // the whole reason instrumenting it is unsafe.
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => null }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      for (let i = 0; i < 20; i += 1) {
+        const res = await fetch(`http://localhost:${port}/dpdp/consent/new`, {
+          headers: { Accept: "text/html" },
+        });
+        assert.equal(res.status, 200,
+          "setup check - the page must actually render, or this test passes by never reaching the route");
+        const html = await res.text();
+        assert.match(html, /<form/, "setup check - the notice and consent form is what was served");
+      }
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+
+    assert.equal(await models.TrailEntry.countDocuments({}), 0,
+      "twenty renders, zero rows - checkOrigin exempts GET, so any row written here is one an attacker appends from an <img> tag on a site they control, at whatever rate they like");
+  });
+});
+
+test("twenty duplicate-signup 409s grow the victim's trail by exactly zero - recording the signup 409 would hand an unauthenticated stranger who knows an email an unthrottled append primitive against that person's own evidence", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+
+    // The victim, with one genuine row already on their trail, so "unchanged"
+    // below is a real comparison and not 0 === 0. Omitting marketing from the
+    // second submission withdraws it, which writes withdrawal_hook_not_fired.
+    const victim = await persistPIIwithconsent({
+      models,
+      pii: PII,
+      consentTypes: ["marketing", "underwriting"],
+    });
+    await persistPIIwithconsent({
+      models,
+      principalId: victim.principalId,
+      pii: PII,
+      consentTypes: ["underwriting"],
+    });
+    const before = await models.TrailEntry.countDocuments({ principalId: victim.principalId });
+    assert.equal(before, 1, "setup check - the victim must have something buriable on their trail");
+
+    const app = express();
+    app.use("/dpdp", createRouter({ db: conn, resolvePrincipal: () => null }));
+    const server = app.listen(0);
+    const port = server.address().port;
+    try {
+      for (let i = 0; i < 20; i += 1) {
+        // Only the email is needed to reach the existence check - the attacker
+        // is a stranger who knows an address, and nothing more.
+        const res = await fetch(`http://localhost:${port}/dpdp/consent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ name: "Not Asha", email: PII.email, phone: "1", dob: "1990-04-01", consentTypes: ["marketing"] }),
+        });
+        assert.equal(res.status, 409,
+          "setup check - the existence check must refuse before any write, or this test is measuring the wrong route");
+      }
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+
+    assert.equal(await models.TrailEntry.countDocuments({ principalId: victim.principalId }), before,
+      "reads are newest-first and bounded, so twenty appends a stranger controls are an evidence-burial primitive, not an audit trail");
+    assert.equal(await models.TrailEntry.countDocuments({}), before,
+      "and not filed against some other subject either - the refusal is recorded nowhere at all");
+
+    const stored = await models.Principal.findOne({ principalId: victim.principalId });
+    assert.equal(stored.pii.name, PII.name,
+      "the existence check also still runs before any write, so twenty attempts overwrote nothing - this is the C1 attack the route's own comment describes");
+  });
+});
