@@ -11,7 +11,6 @@ const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
 const withdrawConsent = require("../src/services/withdrawConsent");
 const { erasePrincipalPII } = require("../src/services/erasure");
 const { buildNotice } = require("../src/config/notice");
-const { findOrCreatePrincipal } = require("../src/utils/principalId");
 
 const PII = { name: "Asha", email: "asha@example.com", phone: "9876543210", dob: "1990-04-01" };
 
