@@ -5977,7 +5977,7 @@ Expected: PASS - 12 tests, the whole of this file: 2 construction guards, 3 oper
 
 Run: `npm test`
 
-Expected: `ℹ pass 236` / `ℹ fail 0`. The arithmetic, so a mismatch tells you which task drifted rather than only that something did: 160 at HEAD, plus 8 from Task 1, 9 from Task 2, 12 from Task 3, 14 from Task 4, 13 from Task 5, 6 from Task 6 and 2 from Task 7 is 224 going in; the 12 in `test/backoffice.test.js` take it to 236. Each figure is the per-file gate that task's own final step states - if one is off, that task drifted. Nothing here touches `createRouter`, the consent ledger, or any existing service, so no existing test needs updating. `test/index.test.js` is untouched by this task - `createBackOfficeRouter` is exported in Task 9, and until then the new file is reachable only by direct require.
+Expected: `ℹ pass 237` / `ℹ fail 0`. The arithmetic, so a mismatch tells you which task drifted rather than only that something did: 160 at HEAD, plus 8 from Task 1, 9 from Task 2, 13 from Task 3, 14 from Task 4, 13 from Task 5, 6 from Task 6 and 2 from Task 7 is 225 going in; the 12 in `test/backoffice.test.js` take it to 237. Task 3 contributes 13 rather than 12: a review fix round added a test forcing the E11000 recovery branch. Measured, not derived - run `npm test` and trust its own total. Each figure is the per-file gate that task's own final step states - if one is off, that task drifted. Nothing here touches `createRouter`, the consent ledger, or any existing service, so no existing test needs updating. `test/index.test.js` is untouched by this task - `createBackOfficeRouter` is exported in Task 9, and until then the new file is reachable only by direct require.
 
 - [ ] **Step 14: Commit**
 
