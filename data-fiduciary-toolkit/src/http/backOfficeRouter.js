@@ -168,10 +168,15 @@ function createBackOfficeRouter({ db, resolveOperator, rateLimitedByHost, allowe
       // hazard can be reintroduced by a later edit here. Which addresses were
       // probed is forensics; that an operator searched, and found or did not
       // find, is accountability. Only the second is recorded.
+      //
+      // outcome says what actually happened, not merely that the surface was
+      // used - the same rule the trail route below applies. A miss is
+      // "refused", not "recorded": an auditor reading "recorded" here could
+      // not tell a probe from someone's whole lineage having been read.
       await recordTrailStrict(models, {
         principalId: principal ? principal.principalId : undefined,
         kind: "operator_lookup",
-        outcome: "recorded",
+        outcome: principal ? "recorded" : "refused",
         reasonCode: principal ? undefined : "no_match",
         actor: req.actor,
         caseRef,
@@ -221,6 +226,12 @@ function createBackOfficeRouter({ db, resolveOperator, rateLimitedByHost, allowe
       // disclosure - it decides what the record can truthfully say, not
       // whether it gets written. getConsentTrail below is the disclosure,
       // and it still runs only after recordTrailStrict has succeeded.
+      //
+      // Stricter than getConsentTrail needs, defensively: nothing in src/
+      // deletes a Principal and erasePrincipalPII only clears its fields, so a
+      // ConsentRecord can never outlive its Principal through this library -
+      // the orphan case this guards against cannot arise, and the back office
+      // loses no evidence by checking for it anyway.
       const principal = await findPrincipalById({ models, principalId });
 
       // Fail-closed, and before anything is disclosed: if the access record

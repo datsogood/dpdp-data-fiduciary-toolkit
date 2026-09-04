@@ -440,6 +440,24 @@ test("GET /consent/trail is scoped to the session - a principalId in the query s
         body.timeline.some((e) => e.refId === bRefId), false,
         "another principal's rights request must not appear in this trail - the scope is req.principalId and nothing else"
       );
+
+      // Unlike principalId, ?limit= IS read from the query string - it bounds
+      // an input the partition rule does not, since operator_lookup and
+      // operator_trail_read rows are filed under the subject rather than the
+      // acting principal. A valid value is honoured...
+      const limited = await asA.call("GET", "/consent/trail?limit=1");
+      assert.equal(limited.status, 200);
+      const limitedBody = await limited.json();
+      assert.equal(limitedBody.timeline.length, 1, "a valid ?limit= is honoured, not silently ignored the way ?principalId= is");
+      assert.equal(limitedBody.truncated, true);
+
+      // ...and a hostile or malformed one is refused with a 400 before it ever
+      // reaches getConsentTrail, reusing the same assertLimit guard the read
+      // already validates a direct-call limit with.
+      for (const hostile of ["limit[$ne]=1", "limit=abc", "limit=-1", "limit=100000", "limit=1.5"]) {
+        const bad = await asA.call("GET", `/consent/trail?${hostile}`);
+        assert.equal(bad.status, 400, `?${hostile} must be refused, not coerced into a query filter or silently clamped`);
+      }
     } finally {
       await asA.close();
     }

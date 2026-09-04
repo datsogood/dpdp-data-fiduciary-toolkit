@@ -12,7 +12,7 @@ const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = requ
 const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
 const { listConsentManagerRequests } = consentManagerRequest;
-const { getConsentTrail, recordTrail } = require("../services/consentTrail");
+const { getConsentTrail, recordTrail, assertLimit } = require("../services/consentTrail");
 const {
   escapeHtml,
   renderRightsPage,
@@ -435,15 +435,28 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
    *
    * The read itself is not recorded. Logging a principal's own access would
    * make the right of access a write path and change its cost profile.
+   *
+   * ?limit= is optional and validated with the same assertLimit getConsentTrail
+   * uses internally, reused rather than duplicated. operator_lookup and
+   * operator_trail_read rows are filed under the SUBJECT's principalId, so a
+   * principal's stored entries scale with back-office activity as well as
+   * their own acts - the one input the partition rule does not bound - which
+   * is why this route needs a caller-supplied limit at all. A query string
+   * arrives as text, so it is coerced to a Number before assertLimit's own
+   * integer/range check runs; a hostile shape such as ?limit[$ne]=1 coerces to
+   * NaN and is refused the same way a non-integer value is, before it ever
+   * reaches getConsentTrail.
    */
   router.get(
     "/consent/trail",
     requireAuth,
     noStore,
     wrap(async (req, res) => {
+      const limit = req.query.limit === undefined ? undefined : assertLimit(Number(req.query.limit));
       const result = await getConsentTrail({
         models,
         principalId: req.principalId,
+        limit,
         includeOperatorRefs: false,
       });
       res.status(200).json(result);

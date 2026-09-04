@@ -208,7 +208,11 @@ test("a back-office lookup records the disclosure before it answers - a hit file
       );
 
       assert.equal(missRow.kind, "operator_lookup");
-      assert.equal(missRow.outcome, "recorded");
+      assert.equal(
+        missRow.outcome,
+        "refused",
+        "an auditor reading 'recorded' here could not tell a probe from someone's whole lineage having been read - the same rule the trail route's miss branch already follows"
+      );
       assert.equal(
         missRow.principalId,
         undefined,
