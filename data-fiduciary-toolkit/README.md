@@ -15,7 +15,15 @@ The following is a summary of all the responsibilities of a data fiduciary (the 
 4. Ease of consent withdrawal by a Data Principal should be the same as accepting consent.
 5. Data Fiduciary shall ask data processors to cease processing the data principal's PII data, within reasonable time on consent revocation.
 6. Data Principal may engage with a designated consent manager to liaise with a Data Fiduciary.
-7. Audit trail of the consent should be available at any point in time.
+7. Audit trail of the consent should be available at any point in time. This
+   toolkit closes that obligation **forward from the release of the trail
+   feature only**. Entries are written as acts happen, so acts from before that
+   date left no entry, and no backfill is possible or permitted -
+   reconstructing a timestamp nobody observed would be manufacturing evidence,
+   which is the one thing an audit trail must never do. Every trail read
+   returns a `coverageFrom` date saying where the record begins, so an empty
+   trail reads as "we were not recording before this date" rather than as
+   "nothing happened".
 8. Technical and organizational measures to ensure effective adherence of the policies
 9. Data breaches to be intimated on time and mitigated promptly with established SLAs.
 10. Prior collected personal data needs to be erased on revocation of consent. Data processor (3rd party data processing entity, if any) should also be intimated on the erasure of data.
@@ -119,9 +127,23 @@ sent there goes nowhere.
 `principalId` is a random 32-byte value (`crypto.randomBytes(32)`), never
 derived from an email, a phone number, or anything else an attacker could
 already know. It is minted server-side the first time someone signs up
-(`POST /consent`), and it is never read from a request body or query string
-on any route - the only source of identity on every other route is
-`resolvePrincipal(req)`, which you supply.
+(`POST /consent`), and on **every route `createRouter` mounts** it is never
+read from a request body or query string - the only source of identity on
+every other principal-facing route is `resolvePrincipal(req)`, which you
+supply.
+
+There is exactly one carve-out, and it is on the separate back-office router,
+never on `createRouter`: `POST /principals/trail` takes the `principalId` it
+is asked about from the request body. There it is a **query subject**, not a
+credential, and the carve-out is only sound because all four of these hold.
+Operator identity still comes only from `resolveOperator(req)`, so the rule is
+unchanged for the thing it was written to protect. The operator is not the
+subject, so naming a different id escalates nothing - an operator who may read
+one trail may read any, which is what a back office is. `assertPrincipalId`
+runs before the value reaches any filter, so the injection half of the rule is
+enforced exactly as it is everywhere else. And the route is gated by operator
+authentication and a fail-closed access record, so every use of it is
+attributable to a named member of staff. See "The consent audit trail" below.
 
 `resolvePrincipal` may be synchronous or return a `Promise`; it should
 resolve your own session (a cookie, a bearer token, whatever your host
@@ -386,21 +408,170 @@ POST /consent-manager   // auth
 ## Reading it back
 
 Every write above has a matching read. Every read is **auth**, scoped by
-construction to the signed-in principal (there is no path to read another
-principal's data - a `refId` that exists but belongs to someone else 404s,
-the same as one that does not exist at all, so a guessed reference cannot be
-distinguished from a wrong one), and sent with `Cache-Control: no-store` so a
-shared cache or CDN, or a browser's own disk/back-forward cache on a shared
-machine, cannot serve one principal's response to the next.
+construction to the signed-in principal (on every route `createRouter` mounts
+there is no path to read another principal's data - a `refId` that exists but
+belongs to someone else 404s, the same as one that does not exist at all, so a
+guessed reference cannot be distinguished from a wrong one; the back-office
+router is the one deliberate exception, on its own mount, and it is described
+below), and sent with `Cache-Control: no-store` so a shared cache or CDN, or a
+browser's own disk/back-forward cache on a shared machine, cannot serve one
+principal's response to the next.
+
+None of these routes takes a `principalId` from the request. The id they are
+scoped to is the one `resolvePrincipal(req)` returned; a `?principalId=` or a
+body field is ignored. Reading another person's record by naming them is the
+back office's job, on its own router, behind your own staff authentication and
+its own fail-closed access record - see "The consent audit trail" below.
 
 | Route | Returns |
 | --- | --- |
 | `GET /consent` | `{ docRef, principalId, state, ledger, notice, pii, erasedAt, createdAt, updatedAt }` - the Section 11 right of access: the full event ledger plus current PII (`pii` is `null` if erased). |
+| `GET /consent/trail` | `{ principalId, docRef, coverageFrom, timeline, truncated, totalEntries }` - the consent audit trail: what this principal did and what they were told, refusals and silent no-ops included, plus who in the back office has read their record (the individual operator's reference is withheld). |
 | `GET /rights/requests` | Every rights request this principal filed, most recent first, capped at 200. |
 | `GET /rights/requests/:refId` | One rights request. |
 | `GET /grievances` | Every grievance this principal filed, most recent first, capped at 200. |
 | `GET /grievances/:refId` | One grievance. |
 | `GET /consent-manager/requests` | Every consent-manager request this principal filed, most recent first, capped at 200. |
+
+## The consent audit trail
+
+`GET /consent` answers "what did this person end up consenting to". The trail
+answers the question a Grievance Officer, a Section 11 access request and the
+Data Protection Board actually ask: **what did this person do, and what did we
+tell them** - refusals and silent no-ops included, which until now left no
+trace anywhere.
+
+**The partition rule**, which everything else falls out of: the trail stores
+only facts that are destroyed, or never written, anywhere else, and everything
+a read can recover from a primary collection is derived at read time and never
+copied. A consent event, a rights request, a grievance, an escalation, a
+consent-manager handoff and an erasure all already carry a real, observed
+timestamp, so the trail reads those where they live. A refused withdrawal, a
+re-grant submitted without `regrant: true`, a purpose refused for a child, an
+age-gate refusal, a contact correction (which overwrites the old hash), a
+request status transition (which the lifecycle functions overwrite in place)
+and a back-office disclosure leave nothing behind at all, so those are stored.
+Nothing is both stored and derived, so nothing can be double-reported, and no
+fact is ever reconstructed from a timestamp nobody observed.
+
+Two surfaces, separate on purpose.
+
+### The data principal's own
+
+`GET /consent/trail`, on `createRouter`, behind `requireAuth`, scoped to the
+session principal and sent `no-store` like every other read. It includes the
+rows recording that someone in your back office read their record - with the
+individual operator's reference withheld - so a data principal exercising
+their right of access can see **who looked at them**. This is the headline of
+the feature, not the back office.
+
+```js
+GET /consent/trail   // auth
+-> 200 {
+     principalId, docRef,
+     coverageFrom: "2026-09-04",
+     timeline: [
+       { at, kind, source, outcome, actor: { role, channel },
+         reasonCode, refId, receiptId, consentTypes, fromStatus, toStatus, count }
+     ],
+     truncated: false,
+     totalEntries: 9
+   }
+```
+
+Every element has the same shape whether it was stored or derived, so nothing
+consuming it has to branch on where it came from; `source` is `"stored"` or
+`"derived"` and says which. `outcome` is always one of `recorded`, `refused`
+or `no_change`, so a refusal can never be mistaken for a state change.
+`actor.role` classifies the kind of caller, not a verified session:
+`"principal"` covers both the session-verified `PUT /consent` and the
+deliberately unauthenticated `POST /consent` - the same label spanning two
+different verification states. The read is bounded rather than paginated -
+under the partition rule a normal principal has single-digit stored entries -
+and `truncated` plus `totalEntries` say honestly whether you have seen
+everything.
+
+### Your back office
+
+`createBackOfficeRouter` is a **second router**, mounted separately, behind
+your own staff authentication. It is not part of `createRouter` and must not be
+mounted on the same path.
+
+```js
+const { createBackOfficeRouter } = require("dpdp-fiduciary-toolkit");
+
+app.use(
+  "/back-office",
+  yourStaffAuthMiddleware,
+  yourRateLimiter,                        // required - see below
+  createBackOfficeRouter({
+    db,
+    // (req) => { actorRef } | Promise<{ actorRef }>. Your staff session
+    // lookup, the exact counterpart of resolvePrincipal. Missing, throwing,
+    // or returning anything else and every route here answers 401.
+    resolveOperator: (req) => ({ actorRef: req.staff.id }),
+    rateLimitedByHost: true,
+    allowedOrigins: ["https://back-office.example"],
+  })
+);
+```
+
+```js
+POST /principals/lookup   { "email": "asha@example.com", "caseRef": "TKT-90210" }
+-> 200 { principalId: "..." }      // 404 if nobody matches
+
+POST /principals/trail    { "principalId": "...", "caseRef": "TKT-90210" }
+-> 200 { principalId, docRef, coverageFrom, timeline, truncated, totalEntries }
+```
+
+Both are POST, and neither puts a contact detail or a `principalId` in a URL:
+a raw email in a path or query string lands in access logs, browser history,
+`Referer` headers and CDN cache keys, none of which this library can reach to
+clean up. The trail read is POST for a second reason - under the access-record
+rule it performs a database write, and `GET` is exempt from the same-origin
+check, so a cross-site-triggerable write into the accountability record,
+attributed to a signed-in operator, would not be acceptable.
+
+The lookup is **email only**, and refuses the phone branch that
+`findConsentTrailByContact` still offers a direct library caller - the same
+rule `POST /consent` already applies. One handset can belong to a whole
+household, so a phone number identifies nobody on its own.
+
+Every access is recorded **before anything is returned**, and that write
+**fails closed**: if the access record cannot be written you get a `503` and no
+data at all. No record, no disclosure - an unaudited people-search is worse
+than no people-search. `caseRef` is your own ticket reference for the access,
+so the record says *why* someone was looked up and not only by whom: answering
+a Section 11 request, rather than browsing.
+
+What the access record deliberately does **not** hold is any hash of the
+address that was searched for. On a hit it files under `principalId` and
+nothing else; on a miss it stores no subject whatsoever, only that an operator
+searched and found nothing. Storing the hash beside the `principalId` would
+rebuild the email-to-person index erasure exists to destroy - you hold
+`PRINCIPAL_ID_SECRET`, so you could recompute it and rejoin an erased person to
+their surviving record forever - and storing it on a miss would mint a
+permanent contact-derived identifier for someone who is not your data principal
+at all. The collection has no field either could be written to.
+
+### The unmounted function
+
+```js
+const { findConsentTrailByContact } = require("dpdp-fiduciary-toolkit");
+
+const trail = await findConsentTrailByContact({ models, email: "asha@example.com" });
+// -> the same trail shape, or null if nobody matches
+```
+
+Exported and **deliberately not a route** - the same pattern as
+`erasePrincipalPII`, `updatePrincipalContact` and the fiduciary-side lifecycle
+functions. It keeps the phone branch the HTTP surface refuses, because a direct
+library caller is already inside your trust boundary and is not a browser.
+
+See "What this is not" below for the four limits that come with all of this:
+it is not retroactive, its instrumentation writes are best-effort, it makes no
+completeness claim, and the back-office surface processes your own staff's
+personal data under your own basis.
 
 ## Age gate and parental consent
 
@@ -602,18 +773,65 @@ expect.
   does not know about to cease processing. Ceasing processing and erasing
   downstream are duties your integration has to complete; this toolkit gives
   you the signal and the primitive, not the pipeline.
+  One withdrawal path is quieter than the rest, and the trail now says so
+  in writing. `PUT /consent` can withdraw a purpose **by omission** - submitting
+  a shorter consent list withdraws whatever is missing from it - and on that
+  path no `onWithdrawal` hook is called at all, because
+  `persistPIIwithconsent` takes no such parameter and the router passes none.
+  The withdrawal itself is in the ledger, so the trail derives it; what the
+  trail *adds* is a `withdrawal_hook_not_fired` entry recording that your
+  cease-processing pipeline was never told. That is written proof that a
+  Section 6(6) cessation duty may have gone undischarged, and closing it is
+  yours to do: recording that the hook did not fire is not the same as firing
+  it.
 - **`erasePrincipalPII` clears the `Principal` document only.** Free text a
   data principal typed into a grievance description, a rights-request
   `details` field, or a consent-manager `message` is not touched - deciding
   what in a block of prose is personally identifying is a judgement call an
   automated pass gets wrong. A deployment that treats `erasePrincipalPII` as
   completing a Section 12 erasure request, without also reviewing those three
-  collections by hand, has not completed it.
-- **No rate limiting on any route.** The nearer-term risk this toolkit closes
-  is storage exhaustion via unbounded free text: every free-text field has a
+  collections by hand, has not completed it. A **fourth** collection survives
+  erasure and is deliberately *not* on that review list: `trailentries`, the
+  consent audit trail. Erasure writes nothing to it, edits nothing in it and
+  deletes nothing from it, and it holds no free text and no contact detail by
+  construction - there is no field on it a contact hash could be written to -
+  so it is retained pseudonymously as evidence, exactly as the consent ledger
+  is, with nothing in it for you to review.
+- **The consent audit trail is evidence of what was recorded, not proof that
+  nothing else happened.** Four limits, stated rather than implied. It is **not
+  retroactive**: it covers forward from the release of the feature, every read
+  returns the `coverageFrom` date that says so, and no backfill is possible or
+  permitted - inventing a timestamp nobody observed would be manufacturing
+  evidence. Its instrumentation writes are **best-effort**: a trail write that
+  fails is logged and the underlying act proceeds, because the trail must never
+  take down consent capture, a withdrawal, or the refusal message a data
+  principal needs to read. So an entry can be missing, and this package makes
+  **no completeness claim** - the same register as "recorded", never "sent".
+  Only the back office's own access records fail the other way, closed: if the
+  record cannot be written, the disclosure does not happen and you get a `503`.
+  And the back-office surface **processes your own staff's personal data**:
+  `actor.ref` and `caseRef` are retained in a collection nothing deletes from,
+  under your own employment basis, not under anything this library provides.
+  `assertOpaqueRef` bounds their *shape*: it is a positive allow-list, not a
+  blocklist, admitting only letters, digits, dot, underscore, colon and
+  hyphen - which leaves no room for a space, so no free text; no room for `@`,
+  so no address; no room for other punctuation, so no phone number - but it
+  does not bound their *meaning*: `johnsmith` passes it unharmed. You owe your
+  staff duties this library does not discharge.
+- **No rate limiting on any route - and for one mount it is a hard
+  prerequisite, not a note.** The nearer-term risk this toolkit closes is
+  storage exhaustion via unbounded free text: every free-text field has a
   Mongoose `maxlength` cap, and the request body itself is capped at 100kb.
-  Request-volume rate limiting (e.g. `express-rate-limit` in front of this
-  router) is host middleware's job and is not shipped here.
+  Request-volume rate limiting (e.g. `express-rate-limit` in front of the
+  router) is host middleware's job and is not shipped here. For `createRouter`
+  that is informational. For `createBackOfficeRouter` it is not:
+  `POST /principals/lookup` answers whether an address belongs to a registered
+  data principal, and with the shipped catalog's fiduciary being a lender,
+  "registered" means "applied for credit". That router therefore **refuses to
+  build** unless you pass `rateLimitedByHost: true` to acknowledge you have put
+  a limiter in front of it. Omitting it throws at startup, the same way a
+  placeholder Grievance Officer address does, and for the same reason: loud at
+  boot, rather than silent at boot and loud in front of a data principal.
 - Not yet published to npm, and `npm install <git-url>` does not work, because
   `package.json` lives in the `data-fiduciary-toolkit/` subdirectory rather than
   at the repository root. Until it is published, vendor the `src/` directory or
@@ -621,9 +839,12 @@ expect.
   examples above is the name it will publish under.
 
 Four items above - withdrawal/erasure not reaching your processors, erasure
-not reaching free text, no rate limiting, and the install-from-git failure -
-are closed **by this documentation, not by code**: an integrator who needs
-any of them should plan to build it, not assume it exists. Contact
+not reaching free text, no rate limiting on `createRouter`, and the
+install-from-git failure - are closed **by this documentation, not by code**:
+an integrator who needs any of them should plan to build it, not assume it
+exists. Rate limiting in front of `createBackOfficeRouter` is the one
+exception in that list: there the documentation is backed by a boot-time
+refusal, so a deployment that has not thought about it does not start. Contact
 correction is a different shape of gap: real code backs it
 (`updatePrincipalContact`, exported), it is just deliberately not a route -
 the same pattern as `erasePrincipalPII` and the fiduciary-side lifecycle
