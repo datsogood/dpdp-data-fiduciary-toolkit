@@ -1,7 +1,6 @@
 const { getValidConsentTypes } = require("../config/catalog");
-const { assertOpaqueRef } = require("../utils/validate");
+const { assertOpaqueRef, assertPrincipalId } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
-const { assertPrincipalId } = require("../utils/validate");
 const { findPrincipalByContact } = require("../utils/principalId");
 
 // The date this feature shipped. The trail is not retroactive and no backfill
@@ -141,16 +140,20 @@ const MAX_SCAN = 5000;
  * ConsentManagerRequest and Principal.erasedAt each store what happened and
  * not who did it.
  *
- * Read as a claim about a person it would be wrong on at least one kind -
- * principal_erased is a fiduciary-side act, since erasePrincipalPII is
- * exported and deliberately unmounted (src/index.js:35-37). What it means is
- * "this came out of the principal's own record, and nothing observed who
- * acted". The entries that genuinely name an actor are the stored ones, which
- * is the whole reason design section 4 puts `actor` in the stored half.
+ * unattributed, not principal: a derived entry cannot name an actor because
+ * its source collection never recorded one. principal_erased makes this
+ * plainest - erasePrincipalPII is exported and deliberately unmounted
+ * (src/index.js:35-37), so erasure is always fiduciary-side, and stamping it
+ * "principal" would attribute the fiduciary's own act to the person it was
+ * done to. A withdrawConsent or persistPIIwithconsent call made by staff on a
+ * principal's behalf is misattributed the same way if it is stamped
+ * "principal" here. The entries that genuinely name an actor are the stored
+ * ones, which is the whole reason design section 4 puts `actor` in the stored
+ * half.
  *
  * Frozen because one object is shared by every derived entry of every read.
  */
-const DERIVED_ACTOR = Object.freeze({ role: "principal", channel: "library" });
+const DERIVED_ACTOR = Object.freeze({ role: "unattributed", channel: "library" });
 
 /** ConsentRecord.events[].status -> the derived kind. The enum is closed to these three. */
 const LEDGER_KIND = {
@@ -213,6 +216,10 @@ function byRecency(a, b) {
   const byTime = b.at.getTime() - a.at.getTime();
   if (byTime !== 0) return byTime;
   if (a.sourceRank !== b.sourceRank) return a.sourceRank - b.sourceRank;
+  // ordinal is String(_id) for a stored row and a Number for a derived one,
+  // so this comparison is only ever reached once the sourceRank check above
+  // has already made a and b the same kind - a future third source must keep
+  // that property, or this comparison needs to change with it.
   if (a.ordinal === b.ordinal) return 0;
   return a.ordinal > b.ordinal ? -1 : 1;
 }
@@ -426,4 +433,15 @@ async function findConsentTrailByContact({ models, email, phone }) {
   return getConsentTrail({ models, principalId: principal.principalId });
 }
 
-module.exports = { COVERAGE_FROM, UNATTRIBUTED, recordTrail, recordTrailStrict, getConsentTrail, findConsentTrailByContact };
+module.exports = {
+  COVERAGE_FROM,
+  UNATTRIBUTED,
+  recordTrail,
+  recordTrailStrict,
+  getConsentTrail,
+  findConsentTrailByContact,
+  // Exported so a caller validating a limit before it reaches getConsentTrail
+  // - GET /consent/trail's query parameter - reuses the one guard rather than
+  // writing a second one.
+  assertLimit,
+};

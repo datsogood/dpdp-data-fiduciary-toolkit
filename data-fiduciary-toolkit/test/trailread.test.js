@@ -34,8 +34,9 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 const PRINCIPAL_API = { role: "principal", channel: "api" };
 const OPERATOR = { role: "operator", ref: "emp-10432", channel: "api" };
 // Every derived entry carries this one, because no primary collection stores
-// an actor at all.
-const DERIVED = { role: "principal", channel: "library" };
+// an actor at all - not even principal_erased, since erasePrincipalPII is
+// exported and deliberately unmounted, so erasure is always fiduciary-side.
+const DERIVED = { role: "unattributed", channel: "library" };
 
 // ---------------------------------------------------------------------------
 // The twelve-act timeline. This is the feature's executable documentation:
@@ -370,6 +371,50 @@ test("a successful withdrawal appears once, derived - the partition rule makes d
     assert.equal(withdrawals[0].source, "derived");
     assert.deepEqual(withdrawals[0].consentTypes, ["marketing"]);
     assert.equal(trail.totalEntries, 6, "five signup decisions plus one withdrawal, not seven");
+  });
+});
+
+test("a partially-refused withdrawal writes disjoint halves - the withdrawn.length>0 branch that runs record.save() must not change what the refusal loop writes", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    await tick();
+
+    // One call naming two purposes: marketing rests on consent and was just
+    // granted, so it is withdrawable. kyc_reporting rests on Section 7(d), not
+    // on consent, so it can never be withdrawn - the same purpose act 3 of the
+    // twelve-act timeline refuses alone. Naming both together is the strongest
+    // case the partition rule has: the branch that actually calls
+    // record.save() (withdrawn.length > 0) and the branch that writes a pure
+    // refusal both run inside the same call, and one must not bleed into the
+    // other.
+    const result = await withdrawConsent({
+      models, principalId, consentTypes: ["marketing", "kyc_reporting"],
+    });
+    assert.deepEqual(result.withdrawn, ["marketing"], "setup check - marketing must actually have been withdrawn");
+    assert.equal(result.rejected.length, 1, "setup check - kyc_reporting must actually have been refused, or this call tests only the happy path");
+
+    const trail = await getConsentTrail({ models, principalId });
+    const withdrawn = trail.timeline.filter((e) => e.kind === "consent_withdrawn");
+    const refused = trail.timeline.filter((e) => e.kind === "withdrawal_not_applied");
+
+    assert.equal(withdrawn.length, 1, "the ledger observed the withdrawal, so it is derived exactly once");
+    assert.equal(withdrawn[0].source, "derived");
+    assert.deepEqual(withdrawn[0].consentTypes, ["marketing"]);
+
+    assert.equal(refused.length, 1, "the refusal survives nowhere else, so it is stored exactly once");
+    assert.equal(refused[0].source, "stored");
+    assert.equal(refused[0].outcome, "refused");
+    assert.equal(refused[0].reasonCode, "not_withdrawable");
+    assert.deepEqual(refused[0].consentTypes, ["kyc_reporting"]);
+
+    const withdrawnTypes = new Set(withdrawn.flatMap((e) => e.consentTypes));
+    const refusedTypes = new Set(refused.flatMap((e) => e.consentTypes));
+    assert.equal(
+      [...withdrawnTypes].some((t) => refusedTypes.has(t)),
+      false,
+      "disjoint - no purpose appears in both halves, so the save() the withdrawn branch runs did not change what the refusal loop wrote"
+    );
   });
 });
 

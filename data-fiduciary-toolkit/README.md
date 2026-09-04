@@ -466,7 +466,7 @@ their right of access can see **who looked at them**. This is the headline of
 the feature, not the back office.
 
 ```js
-GET /consent/trail   // auth
+GET /consent/trail?limit=50   // auth; limit optional, 1-1000, default 500
 -> 200 {
      principalId, docRef,
      coverageFrom: "2026-09-04",
@@ -483,13 +483,29 @@ Every element has the same shape whether it was stored or derived, so nothing
 consuming it has to branch on where it came from; `source` is `"stored"` or
 `"derived"` and says which. `outcome` is always one of `recorded`, `refused`
 or `no_change`, so a refusal can never be mistaken for a state change.
-`actor.role` classifies the kind of caller, not a verified session:
-`"principal"` covers both the session-verified `PUT /consent` and the
-deliberately unauthenticated `POST /consent` - the same label spanning two
-different verification states. The read is bounded rather than paginated -
-under the partition rule a normal principal has single-digit stored entries -
-and `truncated` plus `totalEntries` say honestly whether you have seen
-everything.
+`toStatus` is usually the lifecycle value a `request_status_changed` row
+transitioned to; `contact_corrected` is the one exception, where it instead
+names which contact field changed (`"email"`, `"phone"` or `"email+phone"`)
+and never carries a value.
+
+`actor.role` classifies the kind of caller, not a verified session, and on a
+stored entry it names one: `"principal"` covers both the session-verified
+`PUT /consent` and the deliberately unauthenticated `POST /consent` - the same
+label spanning two different verification states. Every derived entry instead
+carries `actor: { role: "unattributed", channel: "library" }`: its source
+collection never recorded who acted - `principal_erased` included, since
+`erasePrincipalPII` is exported and deliberately unmounted, so erasure is
+always fiduciary-side - and naming a role nobody observed would be a claim the
+library cannot back.
+
+The read is bounded rather than paginated: `?limit=` changes the window. Under
+the partition rule a principal's own acts produce single-digit stored entries,
+but `operator_lookup` and `operator_trail_read` rows are filed under the
+*subject's* principalId rather than the acting principal's, so a principal who
+has been looked up often by the back office can carry far more stored entries
+than their own activity would predict - that unbounded input is the reason
+`?limit=` exists at all. `truncated` plus `totalEntries` say honestly whether
+you have seen everything.
 
 ### Your back office
 
