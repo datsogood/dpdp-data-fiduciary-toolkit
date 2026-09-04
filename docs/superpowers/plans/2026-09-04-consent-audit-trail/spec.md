@@ -140,16 +140,26 @@ const trailEntrySchema = new Schema({
   // Reference ids only, never free text. All are random and carry no PII.
   refId:     { type: String },   // RQ- / GR- / CM-
   receiptId: { type: String },   // RC-
-  // Validated against getValidConsentTypes() BY THE WRITER and omitted when it
-  // does not match - a withdrawal naming an unknown purpose carries
-  // caller-supplied text, and an email typed into consentTypes must never
-  // reach a collection that survives erasure.
-  consentType: { type: String },
+  // A LIST, because section 6 collapses refusals: one call refusing three
+  // purposes writes one row naming three. Verified - a scalar String path
+  // rejects an array with "Cast to string failed ... (type Array)".
+  //
+  // Every element is validated against getValidConsentTypes() BY THE WRITER
+  // and dropped when it does not match. A withdrawal naming an unknown purpose
+  // carries caller-supplied text (withdrawConsent.js:45-48 pushes it verbatim,
+  // and assertStringArray applies no content check), so an email typed into
+  // consentTypes would otherwise reach a collection that survives erasure.
+  consentTypes: { type: [String], default: undefined },
   // The transition requestLifecycle.js destroys in place.
   fromStatus: { type: String },
   toStatus:   { type: String },
   // Collapsed refusals: one row per (kind, reasonCode) per call.
   count: { type: Number },
+  // The adopter's own ticket reference for a back-office access, so the record
+  // says WHY someone was looked up and not only by whom. Host-supplied and
+  // opaque; carried only on operator_lookup and operator_trail_read. Never
+  // rendered back to a data principal. Guarded by assertOpaqueRef below.
+  caseRef: { type: String },
 });
 ```
 
@@ -158,11 +168,28 @@ const trailEntrySchema = new Schema({
 - `role`: `principal | operator | system | unattributed`. `unattributed` is not a
   synonym for `system` - it means the library genuinely does not know, and
   claiming otherwise would be a claim it cannot back.
-- `ref`: set only for `operator`. Host-supplied and opaque. Guarded by a new
-  `assertActorRef` (bounded length, and a hard 400 if it contains `@`), because a
-  host wiring its SSO subject straight through would put a live email on a record
-  that outlives erasure - H9 rebuilt in a new collection.
+- `ref`: set only for `operator`. Host-supplied and opaque. Guarded by
+  `assertOpaqueRef` - see below.
 - `channel`: `html | api | library`.
+
+**`assertOpaqueRef(value, field)`**, a new helper in `src/utils/validate.js`,
+guards both `actor.ref` and `caseRef`:
+
+```js
+const OPAQUE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+```
+
+A **positive** shape, not a blocklist. An earlier draft rejected any value
+containing `@`, on the theory that it would stop a host wiring its SSO subject
+straight through and putting a live email on a record that outlives erasure -
+H9 rebuilt in a new collection. That guard is the wrong shape twice over: it
+stops an email and nothing else, so a staff member's name or a phone number
+passes it unharmed, and it is a blocklist in a file whose only existing
+discipline is a positive regex (`validate.js:3`, `PRINCIPAL_ID_RE`). The
+character class above admits a staff id, a UUID, an LDAP uid and a ticket
+reference, and admits no address, no phone number with punctuation, no spaces
+and therefore no sentence. It is not a guarantee - `johnsmith` still passes -
+and residual 4 says so plainly rather than implying otherwise.
 
 **Indexes.** Field-level flags only: `principalId` and `actor.ref`. No compound
 index, no unique index, no `schema.index()` call - the repo has none today, and
@@ -204,26 +231,48 @@ that manufactures a new category of personal data.
 
 ## 6. Event vocabulary
 
-Ten kinds, plus one marker row. Every one of the ten exists because something
-is otherwise destroyed.
+Eleven kinds. Every one exists because something is otherwise destroyed.
 
 | Kind | Outcome(s) | Reason codes |
 | --- | --- | --- |
 | `consent_not_applied` | `no_change` | `regrant_not_requested`, `already_in_state` |
-| `consent_refused` | `refused` | `prohibited_for_child`, `unknown_consent_type` |
+| `consent_refused` | `refused` | `prohibited_for_child`, `unknown_consent_type`, `record_erased` |
 | `withdrawal_not_applied` | `refused`, `no_change` | `not_withdrawable`, `unknown_consent_type`, `not_granted` |
 | `age_gate_refused` | `refused` | `parental_consent_required` |
 | `request_status_changed` | `recorded` | - |
 | `escalation_refused` | `refused` | `already_resolved`, `already_escalated`, `sla_not_lapsed` |
 | `contact_corrected` | `recorded` | - |
 | `contact_mismatch_refused` | `refused` | `not_own_contact` |
+| `withdrawal_hook_not_fired` | `recorded` | - |
 | `operator_lookup` | `recorded` | `no_match` |
 | `operator_trail_read` | `recorded` | - |
 
-The eleventh, `trail_opened`, is not an act. It is a single marker row written
-once per deployment carrying the date from which this feature was recording, so
-an empty trail can say "we were not recording before this" instead of implying
-nothing happened. It has no `principalId` and no actor.
+`consent_refused` also carries reason code `record_erased`, for the 409 at
+`router.js:355` and the matching guard in `updatePrincipalContact`
+(`principalId.js:204`). Section 2's table lists that refusal and an earlier
+draft accounted for it nowhere - neither stored, derived, nor cut.
+
+`withdrawal_hook_not_fired` is the one kind whose justification is not obvious,
+so it is argued in full. `PUT /consent` can withdraw a purpose by omission
+(`decide`, `persistPIIwithconsent.js:305`), but `persistPIIwithconsent` has no
+`onWithdrawal` parameter and `router.js:360-371` passes none - so on that path
+the host's cease-processing pipeline is never told. The withdrawal itself is in
+the ledger and is therefore derived, not stored. **That the hook did not fire is
+recorded nowhere at all**, which is exactly what the partition rule says to
+store. It is also the fact a fiduciary most needs: it names a Section 6(6)
+cessation duty that may have gone undischarged.
+
+**There is no marker row.** An earlier draft wrote a single `trail_opened` row
+per deployment to carry `coverageFrom`. Four independent reviews rejected it and
+they were right on the facts: the row could not be written against this schema
+at all, because `actor` and `outcome` are both `required: true` and the marker
+was specified as having neither - verified, `ValidationError: Path 'actor' is
+required`. Under the fail-open rule of section 8.2 that failure would have been
+silent, so `coverageFrom` would have been permanently absent and the one device
+stopping an empty trail from implying nothing happened would have quietly not
+existed. It also bought a singleton-write path, a boot-time race and one query
+per trail read. `coverageFrom` is instead a module constant in
+`src/services/consentTrail.js`, set to the release date and returned verbatim.
 
 **Refusals are never mistakable for successes.** `outcome` is a required field
 and a refusal is `refused`; there is no kind whose name reads as a state change
@@ -282,9 +331,51 @@ the connection's one structural injection guard. Under the partition rule a
 normal principal has single-digit stored entries, so a bounded read with an
 explicit `truncated` flag and a `totalEntries` count is honest and needs neither.
 
-`coverageFrom` is the deploy date of this feature, read from a single
-`trail_opened` marker row. It exists so a trail with nothing in it can say "we
-were not recording before this date" rather than implying nothing happened.
+`coverageFrom` is a module constant in `src/services/consentTrail.js`, set to
+this feature's release date and returned verbatim. It exists so a trail with
+nothing in it can say "we were not recording before this date" rather than
+implying nothing happened. See section 6 for why it is not a stored row.
+
+**The timeline element.** Every entry, stored or derived, has the same shape, so
+a consumer never branches on where it came from:
+
+```js
+{
+  at,                  // Date
+  kind,                // string - section 6 for stored, the table below for derived
+  source,              // "stored" | "derived"
+  outcome,             // "recorded" | "refused" | "no_change"
+  actor: { role, channel },   // derived entries are always { role: "principal", channel: "library" }
+  reasonCode,          // stored refusals only, else undefined
+  refId, receiptId, consentTypes, fromStatus, toStatus, count,  // undefined when not applicable
+}
+```
+
+`actor.ref` and `caseRef` are **withheld from this shape** on the
+principal-facing read - see 8.5. They are present on the back-office read.
+
+The derived `kind` vocabulary, one per row of section 4's derived table:
+
+| Derived kind | Source | `at` |
+| --- | --- | --- |
+| `consent_granted` / `consent_denied` / `consent_withdrawn` | `ConsentRecord.events[]` | `event.timestamp` |
+| `rights_request_filed` | `RightsRequest` | `createdAt` |
+| `grievance_filed` | `Grievance` | `createdAt` |
+| `grievance_escalated` | `Grievance` | `escalatedAt` |
+| `consent_manager_requested` | `ConsentManagerRequest` | `createdAt` |
+| `principal_erased` | `Principal` | `erasedAt` |
+
+**Ordering.** `at` descending. Ties are broken by `source` (stored before
+derived) and then by insertion order - `_id` descending for stored rows, array
+position descending for ledger events. A tiebreak is genuinely needed rather
+than theoretical: `persistPIIwithconsent.js:146` stamps every event of one
+submission with the same `now`, so a signup granting three purposes produces
+three derived entries with identical timestamps, and `consentEventSchema` is
+`{_id: false}` (`ConsentRecord.js:24`) so they have no id to fall back on.
+
+`limit`, `truncated` and `totalEntries` count **merged entries**, not stored
+rows. `truncated: true` means the timeline was cut and the caller has not seen
+everything; `totalEntries` is the full count so the caller knows by how much.
 
 ### 8.2 The failure policy
 
@@ -340,6 +431,33 @@ under D7 it performs a database write, and GET is exempt from `checkOrigin`
 record, attributed to a signed-in operator, is not acceptable. It also keeps the
 principalId out of access logs and `Referer`.
 
+**`principalId` in a request body is a deliberate carve-out from a rule this
+branch otherwise treats as absolute,** and it is named here rather than left for
+a reviewer to find. The audit-remediation plan's Global Constraints say
+"`principalId` is never read from `req.body` or `req.query` on any route", and
+`README.md:122-124` states it as an unqualified property of the library. That
+rule exists because on the principal-facing router `principalId` would be a
+**credential**: reading it from a payload is the C1 attack, letting anyone who
+knows an id act as that person.
+
+On `POST /principals/trail` it is not a credential, it is a **query subject**.
+Four things have to hold for that distinction to be sound, and all four do:
+
+1. Operator identity still comes only from `resolveOperator(req)`, never from the
+   payload. The rule is unchanged for the thing it protects.
+2. The operator is not the subject, so there is no privilege to escalate by
+   naming a different id - an operator authorised to read one principal's trail
+   is authorised to read any, which is what a back office is.
+3. `assertPrincipalId` runs before the value reaches any filter, so the
+   injection half of the rule is enforced exactly as elsewhere.
+4. The route is gated by operator auth AND a fail-closed access record, so every
+   use of the carve-out is attributable.
+
+The rule stays absolute where it was written to apply: `createRouter`'s
+principal-facing routes. `README.md:122-124` must be rewritten to say so rather
+than left as an absolute sentence the library no longer satisfies - see section
+9.
+
 `resolveOperator(req) => { actorRef }` mirrors `resolvePrincipal`: fails closed
 with 401 when absent. The entire shape check sits **inside** the try/catch, and
 the value is copied out defensively, so a hostile or throwing hook 401s rather
@@ -368,17 +486,33 @@ to fail at boot rather than in front of a data principal (`catalog.js:39-51`).
 withheld, so a data principal exercising Section 11 can see **who looked at their
 record**. This is the headline of the feature, not the back office.
 
-## 9. Erasure
+## 9. Erasure, and the documentation this work falsifies
 
 The trail survives erasure as pseudonymous evidence, exactly as `ConsentRecord`
 does. Section 5's invariant plus the section 7 exclusions are what make that
 true, and a test asserts the property directly rather than field by field.
 
 `erasePrincipalPII` writes nothing new and edits nothing: erasure is derived from
-`Principal.erasedAt` per section 4. The inline note at `erasure.js:21-29` and the
-`README.md:605-611` bullet both name three collections holding free text; both
-must be extended to name the trail and state exactly what erasure does to it,
-which is nothing.
+`Principal.erasedAt` per section 4.
+
+Shipping this feature makes several sentences that are true today false. Each is
+a required edit, not a nice-to-have, and each is its own line item in the plan.
+An adopter following documented procedure must not be left acting on a sentence
+this branch invalidated.
+
+| Location | What it says today | Why it becomes false | Required edit |
+| --- | --- | --- | --- |
+| `README.md:122-124` | `principalId` "is never read from a request body or query string on any route" | `POST /principals/trail` reads it from a body | Scope the claim to `createRouter`'s principal-facing routes; state the back-office carve-out and the four conditions in 8.4 |
+| `README.md:387-390` | The same claim, restated for the read path | Same | Same |
+| `erasure.js:21-29` | Names three collections holding free text that erasure does not reach | A fourth collection now survives erasure | Name the trail; state that erasure writes nothing to it, edits nothing in it, and deletes nothing from it, and that it holds no free text by construction |
+| `README.md:605-611` | The same three-collection list in the erasure checklist | Same | Same |
+| `README.md` obligation 7 | The audit trail must be available "at any point in time" | The trail is not retroactive | State that this closes obligation 7 forward from the release date only, and that no backfill is possible or permitted |
+| `README.md:612-618` | Rate limiting is host middleware's job, stated as an informational residual | It becomes a hard prerequisite for the back-office mount | Upgrade it from a residual to a stated prerequisite for that mount specifically, and name the `rateLimitedByHost` acknowledgement |
+| `README.md` "What this is not" | No entry for the trail | The feature needs its own limits stated in the house register | Add a paragraph covering: not retroactive, best-effort writes, no completeness claim, and that the back-office surface processes the adopter's own staff's personal data under the adopter's own basis |
+
+The `PUT /consent` implicit-withdrawal gap (residual 7) also needs a plain
+statement in the register of `README.md:598-604`: that path can withdraw a
+purpose by omission, no hook fires, and the trail now records that it did not.
 
 ## 10. Test plan
 
@@ -430,8 +564,13 @@ design review:
 3. **`actor.ref` is an employee's personal data**, retained in a collection
    nothing deletes from, under the adopter's own employment basis. The adopter
    owes their staff duties this library does not discharge.
-4. **The `@` guard on `actor.ref` is shallow.** A host passing a staff member's
-   name still defeats it.
+4. **`assertOpaqueRef` bounds the shape of `actor.ref` and `caseRef`, not their
+   meaning.** A host passing a staff member's login name, or a ticket id that
+   happens to be a person's initials, produces a value that is structurally
+   opaque and semantically identifying. The regex admits `johnsmith`. What it
+   rules out is an address, a phone number with punctuation, and anything
+   containing a space - so free text and contact details cannot arrive by
+   accident, but a determined integrator can still put personal data there.
 5. **The back-office lookup is still an existence oracle for staff.** A 200
    against a 404 tells an operator whether an address is registered, and with
    the fiduciary in the shipped catalog being a lender, "registered" means
@@ -443,6 +582,17 @@ design review:
    bug adjacent to this work and out of its scope; it is named here so it is not
    discovered as a surprise.
 7. **`PUT /consent` can withdraw a purpose by omission without firing
-   `onWithdrawal`.** The trail now records that this happened, which means it
-   produces written proof that the host's cease-processing pipeline was never
-   told. That is honest, and the README must say so plainly.
+   `onWithdrawal`,** so the host's cease-processing pipeline is never told
+   (`persistPIIwithconsent.js:305`; `router.js:360-371` passes no hook). This
+   spec records that fact as `withdrawal_hook_not_fired`, which means the trail
+   produces written proof that a Section 6(6) cessation duty may have gone
+   undischarged. That is the honest outcome and the README must say so plainly.
+   An earlier draft claimed the trail recorded this as a side effect of
+   recording the withdrawal. It did not and could not: the withdrawal is in the
+   ledger and is therefore derived, so nothing distinguished a withdrawal that
+   told the host from one that did not.
+8. **The implicit-withdrawal path still has no hook.** Recording that it did not
+   fire is not the same as firing it. Closing that gap means adding an
+   `onWithdrawal` parameter to `persistPIIwithconsent`, changing the signature
+   of an exported function on the consent write path - a change this feature
+   should not be making.
