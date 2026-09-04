@@ -266,3 +266,87 @@ test("findPrincipalById returns the principal for a known id and null for an unk
     assert.equal(unknown, null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The contact-correction audit trail.
+//
+// A correction overwrites the old emailHash in place and destroys it. The row
+// records WHICH field moved and nothing else: the old value, the new value and
+// the hash of either are all personal data on a record that outlives erasure.
+// ---------------------------------------------------------------------------
+
+test("a contact correction records which field changed, and neither the old nor the new value", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principal } = await findOrCreatePrincipal({ models, pii: { name: "Asha", email: "asha@example.com" } });
+    const id = principal.principalId;
+    const oldHash = principal.emailHash;
+    assert.ok(oldHash, "setup check - there must be an email hash on file for the correction to destroy");
+
+    await updatePrincipalContact({ models, principalId: id, pii: { email: "asha.new@example.com" } });
+
+    const rows = await models.TrailEntry.find({ principalId: id, kind: "contact_corrected" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcome, "recorded");
+    assert.equal(rows[0].toStatus, "email", "the marker names the field that changed, from a fixed vocabulary");
+    assert.equal(rows[0].count, 1);
+    assert.equal(rows[0].actor.role, "unattributed");
+
+    const stored = JSON.stringify(rows[0]);
+    assert.doesNotMatch(stored, /asha/i, "neither the old nor the new address may appear - both are personal data");
+    assert.doesNotMatch(stored, new RegExp(oldHash),
+      "copying the overwritten hash here would rebuild the email-to-person index erasure exists to destroy");
+    assert.doesNotMatch(stored, new RegExp(lookupHash("asha.new@example.com")),
+      "the new hash is on the Principal document already - the trail stores only what is destroyed");
+  });
+});
+
+test("a correction moving both contact details writes one row naming both, and a name-only edit writes none", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principal } = await findOrCreatePrincipal({
+      models, pii: { name: "Asha", email: "asha@example.com", phone: "9876543210" },
+    });
+    const id = principal.principalId;
+
+    await updatePrincipalContact({
+      models, principalId: id, pii: { email: "asha.new@example.com", phone: "9000000000" },
+    });
+
+    let rows = await models.TrailEntry.find({ principalId: id, kind: "contact_corrected" }).lean();
+    assert.equal(rows.length, 1, "one row per call, never one per field");
+    assert.equal(rows[0].toStatus, "email+phone", "the marker is built in a fixed order, so it is stable to compare");
+    assert.equal(rows[0].count, 2);
+
+    await updatePrincipalContact({ models, principalId: id, pii: { name: "Asha Rao" } });
+    await updatePrincipalContact({ models, principalId: id, pii: { phone: "9000000000" } });
+
+    rows = await models.TrailEntry.find({ principalId: id, kind: "contact_corrected" }).lean();
+    assert.equal(rows.length, 1,
+      "a name change destroys no lookup hash and resubmitting the same number changes nothing - neither is a correction");
+  });
+});
+
+test("an update refused because the record is erased is recorded - the 409 is that branch's only other output", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principal } = await findOrCreatePrincipal({ models, pii: { name: "Asha", email: "asha@example.com" } });
+    const id = principal.principalId;
+    await erasePrincipalPII({ models, principalId: id });
+
+    await assert.rejects(
+      () => updatePrincipalContact({ models, principalId: id, pii: { email: "asha.new@example.com" } }),
+      (e) => e.status === 409,
+      "setup check - erasure is terminal, and this must still be the refusal"
+    );
+
+    const rows = await models.TrailEntry.find({ principalId: id }).lean();
+    assert.equal(rows.length, 1, "erasure itself writes nothing to the trail, so this is the only row");
+    assert.equal(rows[0].kind, "consent_refused");
+    assert.equal(rows[0].outcome, "refused");
+    assert.equal(rows[0].reasonCode, "record_erased");
+    assert.equal(rows[0].toStatus, undefined, "nothing changed, so there is no changed-field marker");
+    assert.doesNotMatch(JSON.stringify(rows[0]), /asha/i,
+      "the refused address must not be written onto a record that has already been erased");
+  });
+});
