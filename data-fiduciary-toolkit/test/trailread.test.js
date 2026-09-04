@@ -590,3 +590,43 @@ test("an unknown principalId is 404 and an operator object is 400 - neither reac
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// The unmounted lookup by contact detail (design section 8.3)
+// ---------------------------------------------------------------------------
+
+test("findConsentTrailByContact resolves an email to a whole trail, and answers null rather than throwing when nobody holds it", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    const record = await models.ConsentRecord.findOne({ principalId }).lean();
+
+    const trail = await findConsentTrailByContact({ models, email: "  ASHA@example.com " });
+    assert.equal(trail.principalId, principalId, "lookupHash normalises case and surrounding whitespace, so a hand-typed address still matches");
+    assert.equal(trail.docRef, record.docRef);
+    assert.equal(trail.coverageFrom, COVERAGE_FROM);
+    assert.equal(trail.totalEntries, 5, "the same object getConsentTrail returns - this function resolves an identity, it does not shape a different read");
+
+    assert.equal(
+      await findConsentTrailByContact({ models, email: "nobody@example.com" }),
+      null,
+      "null, not a 404 - a library caller asking whether an address is one of ours gets an answer, not an exception"
+    );
+    assert.equal(await findConsentTrailByContact({ models }), null, "no contact detail at all is a miss, not an error");
+  });
+});
+
+test("findConsentTrailByContact keeps the 409 on an ambiguous phone - a household handset is not an identity", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const shared = "9876500000";
+    await persistPIIwithconsent({ models, pii: { ...PII, phone: shared }, consentTypes: ["marketing"] });
+    await persistPIIwithconsent({ models, pii: { ...BHIM, phone: shared }, consentTypes: ["marketing"] });
+
+    await assert.rejects(
+      () => findConsentTrailByContact({ models, phone: shared }),
+      (err) => err.status === 409,
+      "findPrincipalByContact refuses to guess which household member a number belongs to, and answering with an arbitrary one of their trails would disclose the wrong person's whole lineage"
+    );
+  });
+});

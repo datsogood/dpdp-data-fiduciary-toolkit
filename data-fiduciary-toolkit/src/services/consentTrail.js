@@ -387,4 +387,43 @@ async function getConsentTrail({ models, principalId, limit = DEFAULT_LIMIT, inc
   };
 }
 
-module.exports = { COVERAGE_FROM, UNATTRIBUTED, recordTrail, recordTrailStrict, getConsentTrail };
+/**
+ * The trail for whoever a contact detail belongs to - the "given a direct
+ * PII" half of the issue this feature answers.
+ *
+ * Deliberately NOT mounted on createRouter, and not for the usual reason. The
+ * principal-facing rule is that principalId is a credential, so it never
+ * comes from a payload; the input here is a raw email or phone number, which
+ * is worse. A route taking one would let anyone who knows an address read
+ * that person's entire lineage, and nothing in this library can prove the
+ * caller controls the mailbox. src/http/backOfficeRouter.js is the supported
+ * transport, and it exists precisely so that reaching this data requires
+ * operator authentication and leaves an access record behind.
+ *
+ * It keeps findPrincipalByContact's phone branch, including its refusal of a
+ * number that matches more than one data principal (utils/principalId.js:158-175).
+ * A direct library caller is already inside the host's trust boundary, so the
+ * household-handset ambiguity is a question the host can answer and an HTTP
+ * surface cannot - which is why the back-office route is email-only and this
+ * function is not.
+ *
+ * Writes no access record. The fail-closed disclosure log needs an operator
+ * to attribute a read to; a call from host code has none, and filing one
+ * under `unattributed` would put a row in the accountability record that
+ * answers nobody's question. A host that calls this instead of mounting the
+ * router owes its own operator_trail_read row.
+ *
+ * Operator references are withheld, because this takes the principal-facing
+ * default. A back office wanting actor.ref and caseRef calls getConsentTrail
+ * with includeOperatorRefs: true itself.
+ *
+ * @returns {Promise<object|null>} the same shape getConsentTrail returns, or
+ *   null when no principal holds that contact detail.
+ */
+async function findConsentTrailByContact({ models, email, phone }) {
+  const principal = await findPrincipalByContact({ models, email, phone });
+  if (!principal) return null;
+  return getConsentTrail({ models, principalId: principal.principalId });
+}
+
+module.exports = { COVERAGE_FROM, UNATTRIBUTED, recordTrail, recordTrailStrict, getConsentTrail, findConsentTrailByContact };
