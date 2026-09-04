@@ -138,3 +138,91 @@ test("a closed rights request's resolution is visible on the principal-facing re
     assert.equal(seen.resolution, "PII erased");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The transition audit trail.
+//
+// row.status = status overwrites the prior value in place and updatedAt holds
+// only the last change, so without these rows a request that moved
+// received -> in_progress -> closed is indistinguishable afterwards from one
+// that went straight to closed.
+// ---------------------------------------------------------------------------
+
+test("a two-step advance records BOTH hops with the from-status each one destroyed", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    await models.RightsRequest.create({
+      principalId: PID, refId: "RQ-TRAIL", right: "erasure", status: "received", slaDueAt: new Date(),
+    });
+
+    await advanceRightsRequest({ models, refId: "RQ-TRAIL", status: "in_progress" });
+    await advanceRightsRequest({ models, refId: "RQ-TRAIL", status: "closed", resolution: "PII erased" });
+
+    const row = await models.RightsRequest.findOne({ refId: "RQ-TRAIL" });
+    assert.equal(row.status, "closed");
+    assert.equal(row.toObject().fromStatus, undefined,
+      "premise of this test - nothing on the request itself remembers where it came from");
+
+    const rows = await models.TrailEntry.find({ principalId: PID, kind: "request_status_changed" }).lean();
+    assert.equal(rows.length, 2, "one row per hop - the middle transition is what updatedAt cannot reconstruct");
+
+    // Matched by destination rather than by order, so the assertion does not
+    // depend on two writes landing in different milliseconds.
+    const toInProgress = rows.find((r) => r.toStatus === "in_progress");
+    const toClosed = rows.find((r) => r.toStatus === "closed");
+    assert.ok(toInProgress && toClosed, "both hops must be present");
+    assert.equal(toInProgress.fromStatus, "received");
+    assert.equal(toClosed.fromStatus, "in_progress",
+      "captured before row.status = status overwrote it - that overwrite is the entire reason this kind exists");
+
+    for (const r of [toInProgress, toClosed]) {
+      assert.equal(r.outcome, "recorded");
+      assert.equal(r.principalId, PID, "the row files under the subject, taken from the request itself");
+      assert.equal(r.refId, "RQ-TRAIL", "the row cites the reference the person holds");
+      assert.equal(r.reasonCode, undefined, "a transition that happened has no reason code");
+      assert.equal(r.actor.role, "unattributed");
+      assert.equal(r.actor.channel, "library");
+    }
+  });
+});
+
+test("every advance* wrapper threads models through - grievance and consent-manager hops are recorded too", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const past = new Date(Date.now() - 86400000);
+    await models.Grievance.create({
+      principalId: PID, refId: "GR-TRAIL", subject: "s", description: "d", addressedTo: "DPO", status: "open", slaDueAt: past,
+    });
+    await models.ConsentManagerRequest.create({
+      principalId: PID, refId: "CM-TRAIL", message: "connect me", status: "received",
+    });
+
+    await advanceGrievance({ models, refId: "GR-TRAIL", status: "in_progress" });
+    await advanceConsentManagerRequest({ models, refId: "CM-TRAIL", status: "connected" });
+
+    const rows = await models.TrailEntry.find({ principalId: PID, kind: "request_status_changed" }).lean();
+    assert.equal(rows.length, 2, "a wrapper that forgot to pass models would silently record nothing");
+    const byRef = Object.fromEntries(rows.map((r) => [r.refId, r]));
+    assert.equal(byRef["GR-TRAIL"].fromStatus, "open");
+    assert.equal(byRef["GR-TRAIL"].toStatus, "in_progress");
+    assert.equal(byRef["CM-TRAIL"].fromStatus, "received");
+    assert.equal(byRef["CM-TRAIL"].toStatus, "connected");
+  });
+});
+
+test("an illegal transition records nothing - a stored transition is only ever one that happened", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    await models.RightsRequest.create({
+      principalId: PID, refId: "RQ-NOPE", right: "access", status: "closed", slaDueAt: new Date(),
+    });
+
+    await assert.rejects(
+      () => advanceRightsRequest({ models, refId: "RQ-NOPE", status: "in_progress" }),
+      (e) => e.status === 409
+    );
+
+    assert.equal(await models.TrailEntry.countDocuments({ principalId: PID }), 0,
+      "the transition did not happen, so nothing may record that it did");
+  });
+});
