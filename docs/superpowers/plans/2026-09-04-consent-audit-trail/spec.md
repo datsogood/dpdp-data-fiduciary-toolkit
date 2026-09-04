@@ -2,6 +2,7 @@
 
 Issue: [#4](https://github.com/datsogood/dpdp-data-fiduciary-toolkit/issues/4) - "Consent audit trail implementation"
 Branch: `feat/consent-audit-trail`
+Folder: `docs/superpowers/plans/2026-09-04-consent-audit-trail/`
 Date: 2026-09-04
 Status: proposed, awaiting review
 
