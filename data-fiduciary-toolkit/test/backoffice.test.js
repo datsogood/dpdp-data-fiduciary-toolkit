@@ -313,6 +313,11 @@ test("POST /principals/trail records the read first, then answers with the trail
       assert.equal(rows.length, 1, "reading someone's trail is itself a disclosure and is itself recorded");
       assert.equal(rows[0].principalId, principalId);
       assert.equal(rows[0].outcome, "recorded");
+      assert.equal(
+        rows[0].reasonCode,
+        undefined,
+        "a real disclosure carries no reasonCode - that field exists to say why access was refused, not to annotate a success"
+      );
       assert.equal(rows[0].caseRef, "TKT-90212");
       assert.equal(rows[0].actor.ref, "staff-4471");
 
@@ -355,6 +360,12 @@ test("POST /principals/trail 404s for an id with no data principal behind it, an
         1,
         "an operator who probes an id that does not exist has still used this surface - a 404 that left no trace would be the one way to use it unrecorded"
       );
+      assert.equal(
+        rows[0].outcome,
+        "refused",
+        "a probe of an id with nothing behind it must not be recorded as a disclosure - an auditor reading 'recorded' here could not tell a probe from someone's whole lineage having been read"
+      );
+      assert.equal(rows[0].reasonCode, "no_match", "the same reasonCode the lookup route's miss branch uses, for the same reason: nothing was found");
     } finally {
       await bo.close();
     }

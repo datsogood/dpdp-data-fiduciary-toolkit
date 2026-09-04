@@ -217,21 +217,36 @@ function createBackOfficeRouter({ db, resolveOperator, rateLimitedByHost, allowe
       const caseRef = readCaseRef(req.body);
       const principalId = assertPrincipalId(req.body.principalId);
 
-      // Fail-closed, and before anything is read: if the access record cannot
-      // be written, recordTrailStrict throws 503 and the disclosure does not
-      // happen at all.
+      // The existence check runs BEFORE the record, but it is not itself a
+      // disclosure - it decides what the record can truthfully say, not
+      // whether it gets written. getConsentTrail below is the disclosure,
+      // and it still runs only after recordTrailStrict has succeeded.
+      const principal = await findPrincipalById({ models, principalId });
+
+      // Fail-closed, and before anything is disclosed: if the access record
+      // cannot be written, recordTrailStrict throws 503 and no data goes out
+      // on ANY path, including this one, where principal lookup already
+      // happened and would otherwise be thrown away unrecorded.
+      //
+      // outcome and reasonCode say what actually happened, not merely that
+      // the surface was used: an operator who reads a real trail gets
+      // "recorded"; an operator who probes an id with nothing behind it gets
+      // "refused" / "no_match", exactly like the lookup route's miss branch.
+      // A row that always said "recorded" would make a probe of a
+      // non-existent id indistinguishable, to an auditor, from an actual
+      // disclosure of someone's whole lineage.
       await recordTrailStrict(models, {
         principalId,
         kind: "operator_trail_read",
-        outcome: "recorded",
+        outcome: principal ? "recorded" : "refused",
+        reasonCode: principal ? undefined : "no_match",
         actor: req.actor,
         caseRef,
       });
 
-      // The existence check runs AFTER the record, not before. An operator who
+      // The 404 is thrown AFTER the record, not before. An operator who
       // probes an id that does not exist has still used this surface, and a
       // 404 that left no trace would be the one way to use it unrecorded.
-      const principal = await findPrincipalById({ models, principalId });
       if (!principal) throw new AppError("No data principal found for that id", 404);
 
       // includeOperatorRefs: this is the back-office view. actor.ref and
