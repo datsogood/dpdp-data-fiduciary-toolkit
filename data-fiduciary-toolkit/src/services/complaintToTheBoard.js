@@ -2,6 +2,7 @@ const { FIDUCIARY } = require("../config/catalog");
 const { generateDocRef } = require("../utils/principalId");
 const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
+const { recordTrail, UNATTRIBUTED } = require("./consentTrail");
 
 /**
  * Files a grievance. Named to match what the person clicks ("complain to
@@ -74,9 +75,12 @@ async function complaintToTheBoard({ models, principalId, subject, description }
  * @param {object} input.models      - model registry, must include Grievance
  * @param {string} input.refId       - the GR- reference returned when it was filed
  * @param {string} input.principalId - the owner, from resolvePrincipal
+ * @param {object} [input.actor]     - who is acting, for the audit trail.
+ *                                     Defaults to UNATTRIBUTED - a direct
+ *                                     library call has no identity to claim.
  * @returns {Promise<{ refId: string, status: string, escalatedAt: Date }>}
  */
-async function escalateToBoard({ models, refId, principalId } = {}) {
+async function escalateToBoard({ models, refId, principalId, actor = UNATTRIBUTED } = {}) {
   assertNonEmptyString(refId, "refId", 64);
   // principalId is now required. Without it this took any refId and never
   // consulted the grievance's owner, so anyone holding or guessing a GR-
@@ -90,23 +94,61 @@ async function escalateToBoard({ models, refId, principalId } = {}) {
   // a GR- reference distinguish "exists, not yours" from "does not exist" -
   // exactly the existence oracle getGrievance was written to avoid.
   const grievance = await models.Grievance.findOne({ refId, principalId });
+  // No trail row on the 404: it is the same answer for a reference that does
+  // not exist and for one that belongs to somebody else, and recording it
+  // would let a stranger guessing GR- references append rows to a trail.
   if (!grievance) throw new AppError("No grievance found with that reference", 404);
-  if (grievance.status === "resolved") throw new AppError("This grievance is already marked resolved", 409);
+
+  // Each refusal below is recorded BEFORE its throw. A refused escalation
+  // saves nothing - the grievance is untouched and the error is the only
+  // output - so without these rows there is no record anywhere that a data
+  // principal tried to reach the Board and was stopped. recordTrail never
+  // throws, so the refusal the person needs to read is unaffected either way.
+  if (grievance.status === "resolved") {
+    await recordTrail(models, {
+      principalId,
+      kind: "escalation_refused",
+      outcome: "refused",
+      reasonCode: "already_resolved",
+      actor,
+      refId: grievance.refId,
+    });
+    throw new AppError("This grievance is already marked resolved", 409);
+  }
   // Null-safe: a document could reach "escalated" by a route this plan does
   // not control (a direct database edit, or a future caller), so escalatedAt
   // is not guaranteed to be set even though escalateToBoard itself always
   // sets it before status.
   if (grievance.status === "escalated") {
+    await recordTrail(models, {
+      principalId,
+      kind: "escalation_refused",
+      outcome: "refused",
+      reasonCode: "already_escalated",
+      actor,
+      refId: grievance.refId,
+    });
     const when = grievance.escalatedAt ? grievance.escalatedAt.toISOString() : "earlier";
     throw new AppError(`This grievance was already escalated on ${when}`, 409);
   }
   if (new Date() < grievance.slaDueAt) {
+    await recordTrail(models, {
+      principalId,
+      kind: "escalation_refused",
+      outcome: "refused",
+      reasonCode: "sla_not_lapsed",
+      actor,
+      refId: grievance.refId,
+    });
     throw new AppError(
       `The Grievance Officer's SLA hasn't lapsed yet (due ${grievance.slaDueAt.toISOString()})`,
       409
     );
   }
 
+  // Nothing is recorded on the way through: an escalation that takes effect
+  // stamps escalatedAt, which the trail read derives from the grievance
+  // itself. Storing it as well would double-report it.
   grievance.status = "escalated";
   grievance.escalatedToBoard = true;
   grievance.escalatedAt = new Date();
