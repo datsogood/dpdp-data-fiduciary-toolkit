@@ -4,6 +4,7 @@ const RightsRequest = require("./RightsRequest");
 const Grievance = require("./Grievance");
 const ConsentManagerRequest = require("./ConsentManagerRequest");
 const NoticeVersion = require("./NoticeVersion");
+const TrailEntry = require("./TrailEntry");
 
 /**
  * Binds every model to one connection and caches the registry on it, so
@@ -23,6 +24,7 @@ function buildModels(connection) {
     Grievance: Grievance.build(connection),
     ConsentManagerRequest: ConsentManagerRequest.build(connection),
     NoticeVersion: NoticeVersion.build(connection),
+    TrailEntry: TrailEntry.build(connection),
   };
   connection.$dpdpModels = models;
   return models;
