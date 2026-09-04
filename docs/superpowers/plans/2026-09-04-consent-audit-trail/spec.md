@@ -121,7 +121,8 @@ ledger "this is the audit trail DPDP expects a fiduciary to be able to produce",
 and a second collection claiming that word contradicts a comment that ships
 today. `README.md:565-566` also disclaims being "a certified/audited compliance
 product". A *trail entry* is a part of the trail, not the trail; the trail is the
-merged read across five sources.
+merged read across six collections - this one, plus `ConsentRecord`,
+`Principal`, `RightsRequest`, `Grievance` and `ConsentManagerRequest`.
 
 ```js
 const trailEntrySchema = new Schema({
