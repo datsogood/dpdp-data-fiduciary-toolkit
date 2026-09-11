@@ -10,7 +10,7 @@
     "directory": "data-fiduciary-toolkit"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=26"
   },
   "files": [
     "src/",
