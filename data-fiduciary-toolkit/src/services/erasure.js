@@ -27,6 +27,17 @@ const { AppError } = require("../utils/errors");
  * fiduciary's own process - but a deployment that treats this function as
  * completing a Section 12 erasure request, without also reviewing those three
  * collections, has not completed it.
+ *
+ * A FOURTH collection now survives erasure, and it is a different case from
+ * those three: `trailentries`, the consent audit trail. This function writes
+ * nothing to it, edits nothing in it and deletes nothing from it - the erasure
+ * is read back from `Principal.erasedAt`, so the trail needs no row of its own
+ * to report it. It is retained pseudonymously for the same reason the consent
+ * ledger is: it is the fiduciary's evidence of what it recorded and what it
+ * told people. Unlike the three collections above it holds no free text and no
+ * contact detail by construction - there is no field on it a contact hash
+ * could be written to at all - so unlike them, there is nothing in it to
+ * review by hand.
  */
 async function erasePrincipalPII({ models, principalId }) {
   assertPrincipalId(principalId);

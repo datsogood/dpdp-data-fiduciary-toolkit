@@ -465,3 +465,135 @@ test("two concurrent first submissions cannot create two ledgers for one princip
       "between them the two calls report exactly the events that were appended");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The withdrawal audit trail.
+//
+// withdrawConsent skips save() entirely when nothing changed, so a refused or
+// no-op withdrawal leaves NO trace anywhere: not on the ledger, not on
+// updatedAt, and not in the response once the person has closed the page.
+// These rows are the only record that they asked.
+// ---------------------------------------------------------------------------
+
+test("a withdrawal naming unknown purposes writes ONE collapsed row, and never the caller's text", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    // "asha@example.com" as a purpose is not a contrivance: assertStringArray
+    // applies no content check, so caller-supplied text reaches this branch
+    // verbatim and must not survive into a collection that outlives erasure.
+    await withdrawConsent({ models, principalId, consentTypes: ["asha@example.com", "not_a_purpose"] });
+
+    const rows = await models.TrailEntry.find({ principalId, kind: "withdrawal_not_applied" }).lean();
+    assert.equal(rows.length, 1, "two unknown purposes in one call collapse to one row, not two");
+    assert.equal(rows[0].outcome, "refused");
+    assert.equal(rows[0].reasonCode, "unknown_consent_type");
+    assert.equal(rows[0].count, 2, "count carries how many purposes were refused for this reason");
+    assert.deepEqual(rows[0].consentTypes ?? [], [],
+      "an unknown purpose is caller text, so the writer drops every element - the count survives, the strings do not");
+    assert.equal(rows[0].actor.role, "unattributed",
+      "a direct library call has no identity, and claiming 'system' would be a claim the library cannot back");
+    assert.equal(rows[0].actor.channel, "library");
+    assert.doesNotMatch(JSON.stringify(rows[0]), /asha@example\.com/i,
+      "an email typed into consentTypes must appear nowhere in the trail");
+  });
+});
+
+test("a withdrawal refused as non-withdrawable is recorded, even though the ledger save is skipped", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["kyc_reporting"] });
+    const before = (await models.ConsentRecord.findOne({ principalId })).events.length;
+
+    const r = await withdrawConsent({
+      models,
+      principalId,
+      consentTypes: ["kyc_reporting"],
+      actor: { role: "principal", channel: "api" },
+    });
+    assert.equal(r.withdrawn.length, 0,
+      "setup check - this purpose must actually be refused, or the branch under test is never reached");
+
+    const after = (await models.ConsentRecord.findOne({ principalId })).events.length;
+    assert.equal(after, before, "the ledger is untouched, which is exactly why the trail row has to exist");
+
+    const rows = await models.TrailEntry.find({ principalId, kind: "withdrawal_not_applied" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcome, "refused");
+    assert.equal(rows[0].reasonCode, "not_withdrawable");
+    assert.deepEqual(rows[0].consentTypes, ["kyc_reporting"],
+      "a catalog purpose is not caller text, so the writer keeps it");
+    assert.equal(rows[0].receiptId, r.receiptId, "the row cites the receipt the person was handed");
+    assert.equal(rows[0].actor.role, "principal",
+      "a supplied actor is carried through verbatim - the router is what knows who is acting");
+    assert.equal(rows[0].actor.channel, "api");
+    assert.equal(rows[0].actor.ref, undefined, "ref is set only for an operator");
+  });
+});
+
+test("a withdrawal of something not currently granted is recorded as no_change, not as a refusal", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    const first = await withdrawConsent({ models, principalId, consentTypes: ["marketing"] });
+    assert.deepEqual(first.withdrawn, ["marketing"], "setup check - the first withdrawal must actually take effect");
+    assert.equal(await models.TrailEntry.countDocuments({ principalId }), 0,
+      "a withdrawal that took effect is in the ledger with a real timestamp, so the trail stores nothing for it");
+
+    await withdrawConsent({ models, principalId, consentTypes: ["marketing"] });
+
+    const rows = await models.TrailEntry.find({ principalId, kind: "withdrawal_not_applied" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcome, "no_change",
+      "the caller got a 2xx and nothing happened - that is not the same as being refused");
+    assert.equal(rows[0].reasonCode, "not_granted");
+    assert.deepEqual(rows[0].consentTypes, ["marketing"]);
+    assert.equal(rows[0].count, 1);
+  });
+});
+
+test("200 unknown purposes in one withdrawal write ONE row - the bound, not 200 inserts", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    // 200 DISTINCT strings, so withdrawConsent's own Set dedup does no work
+    // here and the collapse under test is the only thing holding the count
+    // down. None of them is in the catalog, so all 200 land on one reason.
+    const many = Array.from({ length: 200 }, (_, i) => `not_a_purpose_${i}`);
+    await withdrawConsent({ models, principalId, consentTypes: many });
+
+    const rows = await models.TrailEntry.find({ principalId }).lean();
+    assert.equal(rows.length, 1,
+      "one row per (kind, reasonCode) per call, whatever the size of the payload");
+    assert.equal(rows[0].kind, "withdrawal_not_applied");
+    assert.equal(rows[0].outcome, "refused");
+    assert.equal(rows[0].reasonCode, "unknown_consent_type");
+    assert.equal(rows[0].count, 200,
+      "count is the only thing that scales with the payload, and it is a number not a list");
+    assert.equal(Object.hasOwn(rows[0], "consentTypes"), false,
+      "all 200 are non-catalog caller text, so the writer drops every one and the field is never set");
+  });
+});
+
+test("a 200-type consent submission is refused before any row exists - the bound is unreachable there", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const many = Array.from({ length: 200 }, (_, i) => `not_a_purpose_${i}`);
+
+    // persistPIIwithconsent.js:83-84 rejects the WHOLE submission the moment
+    // any type is not in the catalog, and that check sits above the age gate
+    // and above findOrCreatePrincipal.
+    await assert.rejects(
+      () => persistPIIwithconsent({ models, pii: PII, consentTypes: many }),
+      (e) => e.status === 400 && /Unknown consent type/.test(e.message)
+    );
+
+    assert.equal(await models.TrailEntry.countDocuments({}), 0,
+      "the throw is before any write, so this path cannot produce even one row - let alone 200");
+    assert.equal(await models.Principal.countDocuments({}), 0,
+      "and nothing else is written either, which is the existing guarantee this must not disturb");
+  });
+});

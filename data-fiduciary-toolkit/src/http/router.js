@@ -12,6 +12,7 @@ const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = requ
 const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
 const { listConsentManagerRequests } = consentManagerRequest;
+const { getConsentTrail, recordTrail, assertLimit } = require("../services/consentTrail");
 const {
   escapeHtml,
   renderRightsPage,
@@ -23,6 +24,7 @@ const {
   renderWithdrawalReceipt,
 } = require("./forms");
 const { wantsHtml } = require("./negotiate");
+const { wrap, errorMapper, makeCheckOrigin } = require("./shared");
 
 /**
  * An HTML checkbox group sends one value as a string and two as an array, so a
@@ -66,8 +68,14 @@ function isTrue(value) {
   return value === true || value === "true" || value === "on" || value === "1";
 }
 
-/** Wraps an async handler so a rejection reaches the error mapper below. */
-const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+/**
+ * Who a principal-facing trail row is attributed to. Identity itself still
+ * comes only from resolvePrincipal - this says nothing about WHO, only that
+ * the actor is the data principal and which surface they reached us on. The
+ * channel matters because an HTML refusal and an API refusal are different
+ * failures to answer for: one was read by a person on a page.
+ */
+const principalActor = (req) => ({ role: "principal", channel: wantsHtml(req) ? "html" : "api" });
 
 /**
  * @param {object}   opts
@@ -106,84 +114,11 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   assertConfigured();
   const models = buildModels(db);
 
-  /**
-   * The host of an origin, or null if there isn't one.
-   *
-   * Returning null for an EMPTY host matters as much as returning null for an
-   * unparseable one. `new URL("localhost:3000")` does not throw - it reads
-   * "localhost" as a scheme and yields host "" - and so do "file://" and
-   * "about:blank". Letting "" through would mean a scheme-less config entry
-   * silently never matched anything, while any Origin that also parsed to ""
-   * matched it. Both sides collapse "" to null so neither can happen.
-   */
-  function originHost(value) {
-    try {
-      return new URL(value).host || null;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Same-origin check on state-changing requests.
-   *
-   * The original audit refuted a CSRF finding, and correctly: with no ambient
-   * credential, a cross-site POST conferred nothing an attacker could not
-   * already do with curl. resolvePrincipal changed that. Hosts back it with a
-   * cookie session, and POST /consent/withdraw exists precisely so an HTML
-   * form can reach it - so a cross-site form POST now rides that cookie, and
-   * a forged withdrawal writes to an append-only ledger that cannot be undone.
-   *
-   * Not a substitute for CSRF tokens, which this library cannot issue - it has
-   * no session store, by design, which is the whole point of the injected
-   * hook. But the Fetch specification requires a browser to send Origin on
-   * every request whose method is not GET or HEAD, so rejecting a mismatched
-   * one closes the drive-by case. The absence of BOTH headers is treated as
-   * same-origin because non-browser clients (curl, server-to-server) send
-   * neither and are not the threat here; a browser cannot reach that branch.
-   * Absence is tested as `undefined`, not falsiness, so a present-but-empty
-   * `Origin:` is refused rather than read as "no origin at all".
-   *
-   * A referrer policy can reduce Origin to the literal string "null" rather
-   * than remove it. That parses as neither a URL nor a host, so it lands in
-   * the 403 below - which is right: "null" is evidence of a cross-origin or
-   * sandboxed context, not of a same-origin one.
-   *
-   * Only the host is compared, not the scheme: req.get("host") carries no
-   * scheme, and deriving one from req.protocol would depend on the host's
-   * trust-proxy setting, which this library does not control.
-   *
-   * Hosts must still set SameSite=Lax or Strict on their session cookie -
-   * see the README. This alone is not enough.
-   */
-  function checkOrigin(req, res, next) {
-    if (req.method === "GET" || req.method === "HEAD") return next();
-    const fromOrigin = req.get("origin");
-    const origin = fromOrigin !== undefined ? fromOrigin : req.get("referer");
-    if (origin === undefined) return next();
-
-    const host = originHost(origin);
-    if (!host) return res.status(403).json({ error: "bad origin" });
-
-    // UNION, not replace. Configuring one partner origin must not stop your own
-    // forms working - that footgun fails closed in a way an operator would only
-    // discover in production, on the withdrawal route, which is the one route a
-    // data principal most needs to reach.
-    //
-    // `originHost(o) || o` is what lets a scheme-less entry ("portal.example",
-    // "localhost:3000") be written the way an operator naturally writes it: the
-    // parse yields no host, so the raw string is compared against req.get("host"),
-    // which carries no scheme either.
-    const allowed = host === req.get("host") || allowedOrigins.some((o) => (originHost(o) || o) === host);
-    if (!allowed) return res.status(403).json({ error: "cross-origin request refused" });
-    next();
-  }
-
   const router = express.Router();
   // FIRST, ahead of the body parsers and of requireAuth. There is no reason to
   // parse up to 100kb of a request that is about to be refused, and a forged
   // request should never reach the session lookup at all.
-  router.use(checkOrigin);
+  router.use(makeCheckOrigin(allowedOrigins));
   router.use(express.json({ limit: "100kb" }));
   // extended:true is what let a cross-origin form build principalId[$ne].
   // extended:false produces only string values, removing that delivery path.
@@ -241,14 +176,20 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   }
 
   /**
-   * These six routes are the first cacheable responses in the toolkit that
-   * carry personal data - every pre-existing PII route is POST or PUT, and
-   * neither is cacheable by default. GET /consent in particular returns
-   * name, email, phone, dob, PAN and address on a URL with no
-   * user-identifying component, distinguished only by the host's session
-   * cookie: a shared cache or CDN in front of the host, or a browser's disk
-   * or back-forward cache on a shared machine, could otherwise serve one
-   * principal's response to the next.
+   * Applied to every GET below that returns principal-identifying data. These
+   * are the first cacheable responses in the toolkit that carry personal data
+   * - every pre-existing PII route is POST or PUT, and neither is cacheable by
+   * default. GET /consent in particular returns name, email, phone, dob, PAN
+   * and address on a URL with no user-identifying component, distinguished
+   * only by the host's session cookie: a shared cache or CDN in front of the
+   * host, or a browser's disk or back-forward cache on a shared machine, could
+   * otherwise serve one principal's response to the next. GET /consent/trail
+   * is worse still: it is the whole lineage of one person on the same
+   * undistinguished URL.
+   *
+   * The number of routes is deliberately not stated. It said "six" while the
+   * code had seven, and a count in a comment drifts every time a read route is
+   * added.
    */
   function noStore(req, res, next) {
     res.set("Cache-Control", "no-store");
@@ -257,7 +198,8 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   }
 
   /**
-   * Refuses contact details that are not the signed-in principal's own.
+   * The contact fields supplied that are NOT the signed-in principal's own, or
+   * null when everything matches.
    *
    * persistPIIwithconsent resolves a principal through findOrCreatePrincipal,
    * i.e. by contact hash. Passing a caller-supplied email into it would let any
@@ -265,17 +207,21 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
    * again, merely requiring an account. Comparing against the session
    * principal's own stored hash refuses that without a lookup, so it also adds
    * no way to probe which addresses are registered.
+   *
+   * It returns rather than throwing, and is named for what it returns, because
+   * the refusal now also writes a trail entry and that write is asynchronous.
+   * Making an assert-named helper async would leave a synchronous call site
+   * calling it without await, and a returned promise is truthy but never
+   * throws: the 403 would silently stop happening, the write would land on the
+   * victim, and the unhandled rejection would take the process down on every
+   * mismatched request. Keeping the check synchronous and moving both the
+   * write and the throw into the async handler makes that mistake unavailable.
    */
-  function assertOwnContact(principal, pii) {
-    const mismatch =
-      (pii.email && lookupHash(pii.email) !== principal.emailHash) ||
-      (pii.phone && lookupHash(pii.phone) !== principal.phoneHash);
-    if (mismatch) {
-      throw new AppError(
-        "The contact details supplied do not belong to the signed-in data principal. Use the correction route to change them.",
-        403
-      );
-    }
+  function ownContactMismatch(principal, pii) {
+    const fields = [];
+    if (pii.email && lookupHash(pii.email) !== principal.emailHash) fields.push("email");
+    if (pii.phone && lookupHash(pii.phone) !== principal.phoneHash) fields.push("phone");
+    return fields.length ? fields : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -320,7 +266,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       }
       const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
       const result = await persistPIIwithconsent({
-        models, pii, consentTypes: readConsentTypes(req.body), notice,
+        models, pii, consentTypes: readConsentTypes(req.body), notice, actor: principalActor(req),
       });
       // The receipt page is how a browser user obtains their principalId at
       // all - it is otherwise only ever returned in a JSON body, which is
@@ -352,9 +298,42 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       // erased record would fail later with a confusing message about a
       // missing name rather than saying what actually happened.
       if (principal.erasedAt) {
+        // Recorded before the throw. Erasure is terminal, so this refusal is
+        // the last thing that will ever happen on this record, and it is
+        // thrown before any write - nothing else keeps it.
+        await recordTrail(models, {
+          principalId: req.principalId,
+          kind: "consent_refused",
+          outcome: "refused",
+          reasonCode: "record_erased",
+          actor: principalActor(req),
+        });
         throw new AppError("This data principal's record has been erased and cannot be updated", 409);
       }
-      assertOwnContact(principal, readPii(req.body));
+      const mismatched = ownContactMismatch(principal, readPii(req.body));
+      if (mismatched) {
+        // Awaited, and before the throw. recordTrail is fail-open and never
+        // rejects, so this cannot turn a 403 the caller needs to read into a
+        // 500. Only the NUMBER of mismatched fields is stored: the trail holds
+        // no contact detail, and which field it was does not make the refusal
+        // any more accountable.
+        await recordTrail(models, {
+          principalId: req.principalId,
+          kind: "contact_mismatch_refused",
+          outcome: "refused",
+          reasonCode: "not_own_contact",
+          // principalActor is already at module scope - Task 3 put it there
+          // for exactly this. Re-inlining the object literal would give this
+          // file two definitions of what a principal actor is, and the one
+          // that drifted would be whichever a later reader did not open.
+          actor: principalActor(req),
+          count: mismatched.length,
+        });
+        throw new AppError(
+          "The contact details supplied do not belong to the signed-in data principal. Use the correction route to change them.",
+          403
+        );
+      }
 
       const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
       const result = await persistPIIwithconsent({
@@ -368,6 +347,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
         consentTypes: readConsentTypes(req.body),
         regrant: isTrue(req.body.regrant),
         notice,
+        actor: principalActor(req),
       });
       res.status(200).json(result);
     })
@@ -387,6 +367,11 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       principalId: req.principalId,
       consentTypes: asArray(req.body.consentTypes),
       onWithdrawal,
+      // The service defaults to UNATTRIBUTED, which is the honest answer for a
+      // direct library call and the wrong one here: this request arrived with a
+      // session, on a surface we can name. Same helper as every other
+      // principal-facing site in this file.
+      actor: principalActor(req),
     });
     // Same reasoning as the consent receipt above: withdrawal must be as easy
     // as granting, so a browser gets a page, not a JSON blob, and the same
@@ -431,6 +416,49 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
     noStore,
     wrap(async (req, res) => {
       const result = await getConsentState({ models, principalId: req.principalId });
+      res.status(200).json(result);
+    })
+  );
+
+  /**
+   * The Section 11 lineage view, and the headline of the audit-trail feature.
+   * Merges what the toolkit recorded about this principal with the events it
+   * can derive from the primary collections, newest first. Scoped to
+   * req.principalId only, so this can never read another principal's trail.
+   *
+   * includeOperatorRefs: false withholds actor.ref and caseRef. This read
+   * deliberately DOES include the back-office access rows, so a data principal
+   * can see that their record was looked at - but who looked is the adopter's
+   * own employee's personal data, retained under the adopter's employment
+   * basis, and the ticket reference is the adopter's internal case data.
+   * Neither is the data principal's to receive.
+   *
+   * The read itself is not recorded. Logging a principal's own access would
+   * make the right of access a write path and change its cost profile.
+   *
+   * ?limit= is optional and validated with the same assertLimit getConsentTrail
+   * uses internally, reused rather than duplicated. operator_lookup and
+   * operator_trail_read rows are filed under the SUBJECT's principalId, so a
+   * principal's stored entries scale with back-office activity as well as
+   * their own acts - the one input the partition rule does not bound - which
+   * is why this route needs a caller-supplied limit at all. A query string
+   * arrives as text, so it is coerced to a Number before assertLimit's own
+   * integer/range check runs; a hostile shape such as ?limit[$ne]=1 coerces to
+   * NaN and is refused the same way a non-integer value is, before it ever
+   * reaches getConsentTrail.
+   */
+  router.get(
+    "/consent/trail",
+    requireAuth,
+    noStore,
+    wrap(async (req, res) => {
+      const limit = req.query.limit === undefined ? undefined : assertLimit(Number(req.query.limit));
+      const result = await getConsentTrail({
+        models,
+        principalId: req.principalId,
+        limit,
+        includeOperatorRefs: false,
+      });
       res.status(200).json(result);
     })
   );
@@ -539,6 +567,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
         models,
         refId: req.params.refId,
         principalId: req.principalId,
+        actor: principalActor(req),
       });
       res.status(200).json(result);
     })
@@ -605,51 +634,12 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   );
 
   // ---------------------------------------------------------------------------
-  // One error mapper, registered LAST. Replaces the six per-route catch blocks
-  // that turned every fault into 400 with a raw internal message.
+  // One error mapper, registered LAST. It lives in ./shared because the
+  // back-office router needs the identical three branches, and two copies of an
+  // error mapper drift - the half that drifts being the half that decides which
+  // internal detail reaches a caller.
   // ---------------------------------------------------------------------------
-  router.use((err, req, res, _next) => {
-    // Branch order matters, and each branch closes a specific hole.
-
-    // Mongoose input faults are the CLIENT's fault. CastError included: sending
-    // pii.pan as an object or a malformed date produces one, and reporting that
-    // as 500 would repeat the bug in the opposite direction. Send the field
-    // name, not mongoose's raw text - that text quotes the offending value back.
-    if (err && (err.name === "ValidationError" || err.name === "CastError")) {
-      const fields = err.errors ? Object.keys(err.errors).join(", ") : err.path;
-      const message = `Invalid value for: ${fields}`;
-      if (wantsHtml(req)) return res.status(400).type("html").send(`<p>${escapeHtml(message)}</p>`);
-      return res.status(400).json({ error: message });
-    }
-
-    // A deliberate AppError below 500 is safe to echo - the message is written
-    // for the caller. At or above 500 it is NOT: AppError(..., 500) carries
-    // internal configuration detail (utils/principalId.js throws one naming
-    // PRINCIPAL_ID_SECRET and how to generate it, and that path is reachable
-    // from the unauthenticated POST /consent route).
-    //
-    // A browser gets the same message rendered as HTML rather than a JSON
-    // body - a data principal filling in the consent form has no way to read
-    // JSON. This is also the answer a minor rejected for want of verifiable
-    // parental consent (422, see persistPIIwithconsent) actually sees: the
-    // stated reason, not a raw status code they cannot act on.
-    if (err && typeof err.status === "number" && err.status < 500) {
-      if (wantsHtml(req)) return res.status(err.status).type("html").send(`<p>${escapeHtml(err.message)}</p>`);
-      return res.status(err.status).json({ error: err.message });
-    }
-
-    console.error("[dpdp-toolkit] unhandled error:", err);
-    const status = err && typeof err.status === "number" ? err.status : 500;
-    // Same content negotiation as the two branches above, which this branch
-    // alone was missing - so a browser user filling in the consent form got a
-    // raw JSON body with Content-Type: application/json, on the one branch a
-    // misconfigured deployment actually lands them on. The MESSAGE is still
-    // withheld for the reason given above; only the rendering changes.
-    if (wantsHtml(req)) {
-      return res.status(status).type("html").send("<p>Something went wrong at our end. Please try again later.</p>");
-    }
-    res.status(status).json({ error: "internal error" });
-  });
+  router.use(errorMapper);
 
   return router;
 }
