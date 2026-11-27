@@ -199,10 +199,11 @@ async function updatePrincipalContact({ models, principalId, pii, actor }) {
   // here would be circular and would leave whichever of the two loaded second
   // destructuring a half-built exports object. config/catalog.js requires
   // config/notice.js the same way and for the same reason. It is also why the
-  // default sits here rather than in the parameter list - UNATTRIBUTED is not
-  // in scope until this line has run.
-  const { recordTrail, UNATTRIBUTED } = require("../services/consentTrail");
-  const who = actor || UNATTRIBUTED;
+  // actor is resolved here rather than defaulted in the parameter list -
+  // resolveActor is not in scope until this line has run. Resolved before any
+  // read, so a bad actor stops the update instead of losing its trail entry.
+  const { recordTrail, resolveActor } = require("../services/consentTrail");
+  const who = resolveActor(actor);
 
   assertPrincipalId(principalId);
   if (!pii || typeof pii !== "object") throw new AppError("pii is required", 400);

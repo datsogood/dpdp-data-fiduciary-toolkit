@@ -28,6 +28,11 @@ const { Schema } = require("mongoose");
  * cannot be set.
  */
 
+// Shared with resolveActor in services/consentTrail.js, which checks a
+// caller's actor against the same lists before any work is done.
+const ACTOR_ROLES = ["principal", "operator", "system", "unattributed"];
+const ACTOR_CHANNELS = ["html", "api", "library"];
+
 // role: `unattributed` is NOT a synonym for `system`. It means the library
 // genuinely does not know who acted - a direct service call from host code -
 // and claiming "system" would be a claim it cannot back.
@@ -38,9 +43,9 @@ const { Schema } = require("mongoose");
 // volume, and that index is the whole answer to it.
 const actorSchema = new Schema(
   {
-    role: { type: String, enum: ["principal", "operator", "system", "unattributed"], required: true },
+    role: { type: String, enum: ACTOR_ROLES, required: true },
     ref: { type: String, index: true },
-    channel: { type: String, enum: ["html", "api", "library"], required: true },
+    channel: { type: String, enum: ACTOR_CHANNELS, required: true },
   },
   { _id: false }
 );
@@ -141,4 +146,6 @@ const trailEntrySchema = new Schema({
 module.exports = {
   schema: trailEntrySchema,
   build: (connection) => connection.model("TrailEntry", trailEntrySchema),
+  ACTOR_ROLES,
+  ACTOR_CHANNELS,
 };

@@ -2,7 +2,7 @@ const { getCatalogEntry, getValidConsentTypes, getWithdrawableTypes, contactBloc
 const { assertPrincipalId, assertStringArray } = require("../utils/validate");
 const { generateDocRef } = require("../utils/principalId");
 const { AppError } = require("../utils/errors");
-const { recordTrail, UNATTRIBUTED } = require("./consentTrail");
+const { recordTrail, resolveActor } = require("./consentTrail");
 
 /**
  * Withdraws consent for one or more purposes. Append-only: never edits or
@@ -28,8 +28,11 @@ const { recordTrail, UNATTRIBUTED } = require("./consentTrail");
  * @returns {Promise<{ docRef, receiptId, withdrawn, rejected, noChange, effectiveFrom, contact: { dpoName, dpoEmail } }>}
  *          effectiveFrom is null when withdrawn is empty.
  */
-async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal, actor = UNATTRIBUTED } = {}) {
+async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal, actor } = {}) {
   assertPrincipalId(principalId);
+  // Before the ledger is read, so a bad actor stops the call instead of
+  // losing its trail entry.
+  actor = resolveActor(actor);
   // Deduplicated: a purpose named twice in one request is one decision, and
   // without this the second pass would read the same pre-loop state and append
   // a second identical event that the append-only ledger could never shed.

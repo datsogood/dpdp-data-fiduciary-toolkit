@@ -2,7 +2,7 @@ const { FIDUCIARY } = require("../config/catalog");
 const { generateDocRef } = require("../utils/principalId");
 const { assertPrincipalId, assertNonEmptyString } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
-const { recordTrail, UNATTRIBUTED } = require("./consentTrail");
+const { recordTrail, resolveActor } = require("./consentTrail");
 
 /**
  * Files a grievance. Named to match what the person clicks ("complain to
@@ -80,12 +80,15 @@ async function complaintToTheBoard({ models, principalId, subject, description }
  *                                     library call has no identity to claim.
  * @returns {Promise<{ refId: string, status: string, escalatedAt: Date }>}
  */
-async function escalateToBoard({ models, refId, principalId, actor = UNATTRIBUTED } = {}) {
+async function escalateToBoard({ models, refId, principalId, actor } = {}) {
   assertNonEmptyString(refId, "refId", 64);
   // principalId is now required. Without it this took any refId and never
   // consulted the grievance's owner, so anyone holding or guessing a GR-
   // reference could escalate someone else's complaint (M8).
   assertPrincipalId(principalId);
+  // Before the grievance is read, so a bad actor stops the call instead of
+  // losing the entry a refused escalation would write.
+  actor = resolveActor(actor);
 
   // principalId is part of the filter itself, not checked after the fact -
   // a refId belonging to another principal simply does not match and comes
