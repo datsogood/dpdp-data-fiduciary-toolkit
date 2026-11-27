@@ -27,7 +27,7 @@ const UNATTRIBUTED = { role: "unattributed", channel: "library" };
  * err.message quotes the offending value back - mongoose's cast and duplicate
  * key messages both do - so logging it is how a caller-supplied email reaches
  * a log file. The router's error mapper already holds this line for the same
- * reason (router.js, the CastError branch), and test/auth.test.js pins it.
+ * reason (http/shared.js, the CastError branch), and test/auth.test.js pins it.
  */
 function logTrailFailure(err) {
   console.error("[dpdp] trail write failed", { name: err && err.name, code: err && err.code });
