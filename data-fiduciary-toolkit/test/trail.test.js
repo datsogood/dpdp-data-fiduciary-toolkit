@@ -5,7 +5,7 @@ const { withDb } = require("./helpers/db");
 
 process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
-const { recordTrail, recordTrailStrict, COVERAGE_FROM } = require("../src/services/consentTrail");
+const { recordTrail, recordTrailStrict } = require("../src/services/consentTrail");
 
 const PID = "a".repeat(64);
 
@@ -175,10 +175,6 @@ test("recordTrail writes one row and defaults the actor to unattributed", async 
       "a caller that names no actor gets `unattributed` - the library does not know who acted, and `system` would be a claim it cannot back"
     );
   });
-});
-
-test("COVERAGE_FROM is a plain date string, so an empty trail can say when recording began", () => {
-  assert.match(COVERAGE_FROM, /^\d{4}-\d{2}-\d{2}$/);
 });
 
 test("recordTrail keeps a catalog-valid consent type and drops everything else", async () => {

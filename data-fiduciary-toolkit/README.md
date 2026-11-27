@@ -16,12 +16,12 @@ The following is a summary of all the responsibilities of a data fiduciary (the 
 5. Data Fiduciary shall ask data processors to cease processing the data principal's PII data, within reasonable time on consent revocation.
 6. Data Principal may engage with a designated consent manager to liaise with a Data Fiduciary.
 7. Audit trail of the consent should be available at any point in time. This
-   toolkit closes that obligation **forward from the release of the trail
-   feature only**. Entries are written as acts happen, so acts from before that
+   toolkit closes that obligation **forward from the day you deploy the trail
+   only**. Entries are written as acts happen, so acts from before that
    date left no entry, and no backfill is possible or permitted -
    reconstructing a timestamp nobody observed would be manufacturing evidence,
    which is the one thing an audit trail must never do. Every trail read
-   returns a `coverageFrom` date saying where the record begins, so an empty
+   returns your `TRAIL_COVERAGE_FROM` date as `coverageFrom`, so an empty
    trail reads as "we were not recording before this date" rather than as
    "nothing happened".
 8. Technical and organizational measures to ensure effective adherence of the policies
@@ -61,6 +61,10 @@ A 0.1.0 integration will not boot against 0.2.0 without changes:
 - A `NOTICE_LANGUAGES` entry other than `en` now refuses to boot. Only English
   ships - see "The Section 5 notice" below for why naming another language
   produced false evidence rather than a translation.
+- An unset or malformed `TRAIL_COVERAGE_FROM` refuses to boot. It is the date
+  you first deployed a version that records the consent audit trail, as
+  `YYYY-MM-DD`, and every trail read returns it as `coverageFrom`.
+  `.env.example` ships it empty, because only you know that date.
 - `principalId` is no longer derivable from an email, so 0.1.0 identifiers
   cannot be carried over - see "Migrating from 0.1.0" below.
 - `ConsentRecord.lastNotice` changed shape - see "Migrating from 0.1.0" below.
@@ -75,7 +79,7 @@ A 0.1.0 integration will not boot against 0.2.0 without changes:
 
 ```bash
 npm install
-cp .env.example .env   # then set MONGO_URI and PRINCIPAL_ID_SECRET
+cp .env.example .env   # then set MONGO_URI, PRINCIPAL_ID_SECRET and TRAIL_COVERAGE_FROM
 ```
 
 ```js
@@ -112,12 +116,12 @@ sequence.
 
 ### Configuration is checked at boot
 
-`createRouter` calls `assertConfigured()` before it builds a single route, so
-a deployment carrying the `dpo@example.com` placeholder, or a
-`FIDUCIARY_DPO_EMAIL` that is set but not a plausible address (`"tbd"`,
-`"not-an-email"`, a bare hostname), or a `GRIEVANCE_SLA_DAYS` /
-`RIGHTS_SLA_DAYS` that is not a positive integer, throws at startup instead of
-reaching `listen()`. A placeholder or malformed Grievance Officer address is
+`createRouter` and `createBackOfficeRouter` call `assertConfigured()` before
+they build a single route, so a deployment carrying the `dpo@example.com`
+placeholder, or a `FIDUCIARY_DPO_EMAIL` that is set but not a plausible address
+(`"tbd"`, `"not-an-email"`, a bare hostname), or a `GRIEVANCE_SLA_DAYS` /
+`RIGHTS_SLA_DAYS` that is not a positive integer, or no valid
+`TRAIL_COVERAGE_FROM`, throws at startup instead of reaching `listen()`. A placeholder or malformed Grievance Officer address is
 worse than none: the grievance page publishes it, so the fiduciary looks like
 it has met the duty to publish valid contact details while every complaint
 sent there goes nowhere.
@@ -815,10 +819,11 @@ expect.
   is, with nothing in it for you to review.
 - **The consent audit trail is evidence of what was recorded, not proof that
   nothing else happened.** Four limits, stated rather than implied. It is **not
-  retroactive**: it covers forward from the release of the feature, every read
-  returns the `coverageFrom` date that says so, and no backfill is possible or
-  permitted - inventing a timestamp nobody observed would be manufacturing
-  evidence. Its instrumentation writes are **best-effort**: a trail write that
+  retroactive**: it covers forward from the date you set in
+  `TRAIL_COVERAGE_FROM`, every read returns that date as `coverageFrom`, and no
+  backfill is possible or permitted - inventing a timestamp nobody observed
+  would be manufacturing evidence. Its instrumentation writes are
+  **best-effort**: a trail write that
   fails is logged and the underlying act proceeds, because the trail must never
   take down consent capture, a withdrawal, or the refusal message a data
   principal needs to read. So an entry can be missing, and this package makes

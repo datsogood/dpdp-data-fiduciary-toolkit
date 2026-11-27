@@ -39,7 +39,7 @@ module.exports = {
   // collections that already carry a timestamp. Refusals and silent no-ops are
   // stored because nothing else records them; everything a primary collection
   // can already answer is derived at read time and never copied, so no act is
-  // ever reported twice. Covers forward from its release date only - the
+  // ever reported twice. Covers forward from TRAIL_COVERAGE_FROM only - the
   // returned coverageFrom says so, rather than letting an empty timeline imply
   // that nothing happened.
   getConsentTrail,
