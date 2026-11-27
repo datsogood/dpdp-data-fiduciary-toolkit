@@ -789,18 +789,65 @@ expect.
   does not know about to cease processing. Ceasing processing and erasing
   downstream are duties your integration has to complete; this toolkit gives
   you the signal and the primitive, not the pipeline.
+  One withdrawal path is quieter than the rest, and the trail now says so
+  in writing. `PUT /consent` can withdraw a purpose **by omission** - submitting
+  a shorter consent list withdraws whatever is missing from it - and on that
+  path no `onWithdrawal` hook is called at all, because
+  `persistPIIwithconsent` takes no such parameter and the router passes none.
+  The withdrawal itself is in the ledger, so the trail derives it; what the
+  trail *adds* is a `withdrawal_hook_not_fired` entry recording that your
+  cease-processing pipeline was never told. That is written proof that a
+  Section 6(6) cessation duty may have gone undischarged, and closing it is
+  yours to do: recording that the hook did not fire is not the same as firing
+  it.
 - **`erasePrincipalPII` clears the `Principal` document only.** Free text a
   data principal typed into a grievance description, a rights-request
   `details` field, or a consent-manager `message` is not touched - deciding
   what in a block of prose is personally identifying is a judgement call an
   automated pass gets wrong. A deployment that treats `erasePrincipalPII` as
   completing a Section 12 erasure request, without also reviewing those three
-  collections by hand, has not completed it.
-- **No rate limiting on any route.** The nearer-term risk this toolkit closes
-  is storage exhaustion via unbounded free text: every free-text field has a
+  collections by hand, has not completed it. A **fourth** collection survives
+  erasure and is deliberately *not* on that review list: `trailentries`, the
+  consent audit trail. Erasure writes nothing to it, edits nothing in it and
+  deletes nothing from it, and it holds no free text and no contact detail by
+  construction - there is no field on it a contact hash could be written to -
+  so it is retained pseudonymously as evidence, exactly as the consent ledger
+  is, with nothing in it for you to review.
+- **The consent audit trail is evidence of what was recorded, not proof that
+  nothing else happened.** Four limits, stated rather than implied. It is **not
+  retroactive**: it covers forward from the release of the feature, every read
+  returns the `coverageFrom` date that says so, and no backfill is possible or
+  permitted - inventing a timestamp nobody observed would be manufacturing
+  evidence. Its instrumentation writes are **best-effort**: a trail write that
+  fails is logged and the underlying act proceeds, because the trail must never
+  take down consent capture, a withdrawal, or the refusal message a data
+  principal needs to read. So an entry can be missing, and this package makes
+  **no completeness claim** - the same register as "recorded", never "sent".
+  Only the back office's own access records fail the other way, closed: if the
+  record cannot be written, the disclosure does not happen and you get a `503`.
+  And the back-office surface **processes your own staff's personal data**:
+  `actor.ref` and `caseRef` are retained in a collection nothing deletes from,
+  under your own employment basis, not under anything this library provides.
+  `assertOpaqueRef` bounds their *shape*: it is a positive allow-list, not a
+  blocklist, admitting only letters, digits, dot, underscore, colon and
+  hyphen - which leaves no room for a space, so no free text; no room for `@`,
+  so no address; no room for other punctuation, so no phone number - but it
+  does not bound their *meaning*: `johnsmith` passes it unharmed. You owe your
+  staff duties this library does not discharge.
+- **No rate limiting on any route - and for one mount it is a hard
+  prerequisite, not a note.** The nearer-term risk this toolkit closes is
+  storage exhaustion via unbounded free text: every free-text field has a
   Mongoose `maxlength` cap, and the request body itself is capped at 100kb.
-  Request-volume rate limiting (e.g. `express-rate-limit` in front of this
-  router) is host middleware's job and is not shipped here.
+  Request-volume rate limiting (e.g. `express-rate-limit` in front of the
+  router) is host middleware's job and is not shipped here. For `createRouter`
+  that is informational. For `createBackOfficeRouter` it is not:
+  `POST /principals/lookup` answers whether an address belongs to a registered
+  data principal, and with the shipped catalog's fiduciary being a lender,
+  "registered" means "applied for credit". That router therefore **refuses to
+  build** unless you pass `rateLimitedByHost: true` to acknowledge you have put
+  a limiter in front of it. Omitting it throws at startup, the same way a
+  placeholder Grievance Officer address does, and for the same reason: loud at
+  boot, rather than silent at boot and loud in front of a data principal.
 - Not yet published to npm, and `npm install <git-url>` does not work, because
   `package.json` lives in the `data-fiduciary-toolkit/` subdirectory rather than
   at the repository root. Until it is published, vendor the `src/` directory or
@@ -808,9 +855,12 @@ expect.
   examples above is the name it will publish under.
 
 Four items above - withdrawal/erasure not reaching your processors, erasure
-not reaching free text, no rate limiting, and the install-from-git failure -
-are closed **by this documentation, not by code**: an integrator who needs
-any of them should plan to build it, not assume it exists. Contact
+not reaching free text, no rate limiting on `createRouter`, and the
+install-from-git failure - are closed **by this documentation, not by code**:
+an integrator who needs any of them should plan to build it, not assume it
+exists. Rate limiting in front of `createBackOfficeRouter` is the one
+exception in that list: there the documentation is backed by a boot-time
+refusal, so a deployment that has not thought about it does not start. Contact
 correction is a different shape of gap: real code backs it
 (`updatePrincipalContact`, exported), it is just deliberately not a route -
 the same pattern as `erasePrincipalPII` and the fiduciary-side lifecycle
