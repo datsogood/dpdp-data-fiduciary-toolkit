@@ -7,8 +7,9 @@ const { execFileSync } = require("node:child_process");
 // the tests at the bottom of this file are about.
 process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 process.env.FIDUCIARY_DPO_EMAIL = "dpo@test.example";
-const { getCatalog, getValidConsentTypes, getWithdrawableTypes, RIGHTS_CATALOG, assertConfigured } =
+const { getCatalog, getValidConsentTypes, getWithdrawableTypes, RIGHTS_CATALOG, assertConfigured, trailCoverageFrom } =
   require("../src/config/catalog");
+const { withEnv } = require("./helpers/env");
 
 // The real Section 7 sub-clauses, verified against the statute text. A
 // legitimate use must cite one of these exactly. A prefix check like
@@ -187,6 +188,30 @@ test("assertConfigured refuses to boot without a strong PRINCIPAL_ID_SECRET", ()
   } finally {
     process.env.PRINCIPAL_ID_SECRET = saved;
   }
+});
+
+test("trailCoverageFrom returns TRAIL_COVERAGE_FROM when it is a real date", async () => {
+  await withEnv("TRAIL_COVERAGE_FROM", "2027-01-15", () => {
+    assert.equal(trailCoverageFrom(), "2027-01-15");
+  });
+});
+
+test("trailCoverageFrom refuses an unset, malformed or impossible date", async () => {
+  // Every trail read reports this as the day recording began, so a value that
+  // only looks like a date has to stop the deployment, not reach a regulator.
+  for (const value of [undefined, "", "2026-9-4", "2026-02-30", "2026-13-01", "2026-12-01T00:00:00Z", " 2026-12-01"]) {
+    await withEnv("TRAIL_COVERAGE_FROM", value, () => {
+      assert.throws(() => trailCoverageFrom(), /TRAIL_COVERAGE_FROM[\s\S]*YYYY-MM-DD/, JSON.stringify(value));
+    });
+  }
+});
+
+test("assertConfigured refuses to boot without TRAIL_COVERAGE_FROM", async () => {
+  // Both routers call assertConfigured, so this is what stops either one
+  // building on a deployment that never said when it started recording.
+  await withEnv("TRAIL_COVERAGE_FROM", undefined, () => {
+    assert.throws(() => assertConfigured(), /TRAIL_COVERAGE_FROM/);
+  });
 });
 
 // NOTICE_LANGUAGES is read once at module load, so this has to be a

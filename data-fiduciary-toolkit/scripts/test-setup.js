@@ -26,6 +26,9 @@ let server;
 async function globalSetup() {
   server = await MongoMemoryServer.create({ binary: { version: MONGOD_VERSION } });
   process.env.MONGO_TEST_URI = server.getUri();
+  // Both routers refuse to build without a coverage start date, and every
+  // trail read returns it, so the suite pins one.
+  process.env.TRAIL_COVERAGE_FROM = "2026-09-04";
 }
 
 async function globalTeardown() {

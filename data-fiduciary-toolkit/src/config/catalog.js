@@ -38,7 +38,7 @@ function assertPositiveInteger(value, envName) {
 
 /**
  * Fails fast on configuration that would be shown to a data principal, and on
- * the two settings whose absence only surfaces mid-request.
+ * the settings whose absence only surfaces mid-request.
  *
  * A grievance page telling people to contact dpo@example.com fails the duty
  * to publish valid Grievance Officer contact details while looking like it
@@ -48,7 +48,8 @@ function assertPositiveInteger(value, envName) {
  * one. Failing to boot is loud, immediate, and fixed by one env var; the
  * alternative fails silently, in front of the data principal.
  *
- * Called by createRouter, so a misconfigured deployment never reaches listen().
+ * Called by createRouter and createBackOfficeRouter, so a misconfigured
+ * deployment never reaches listen().
  */
 function assertConfigured() {
   if (PLACEHOLDER_EMAILS.includes(FIDUCIARY.dpoEmail)) {
@@ -88,6 +89,10 @@ function assertConfigured() {
         "submission fail with a 500. Generate one with: openssl rand -hex 32"
     );
   }
+
+  // Every trail read reports this as the day recording began. Unset, both
+  // routers would build and then fail the first trail read.
+  trailCoverageFrom();
 
   // Required lazily, INSIDE the function, on purpose: config/notice.js
   // requires this module at load time, so a top-level require here would be
@@ -249,9 +254,32 @@ const RIGHTS_CATALOG = [
 // after exercising a right or withdrawing consent (L6).
 const contactBlock = () => ({ dpoName: FIDUCIARY.dpoName, dpoEmail: FIDUCIARY.dpoEmail });
 
+/**
+ * The date this deployment began recording the consent trail, from
+ * TRAIL_COVERAGE_FROM. Every trail read returns it as coverageFrom, so an
+ * empty trail says "we were not recording before this date" rather than
+ * implying nothing happened. Only the deployment knows that date.
+ *
+ * Read on every call rather than at load. It must be exactly YYYY-MM-DD and
+ * a real day: "2026-02-30" would otherwise roll into March, and a timestamp
+ * or a stray space is a copy-paste mistake, not a date.
+ */
+function trailCoverageFrom() {
+  const value = process.env.TRAIL_COVERAGE_FROM;
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(value || "") ? new Date(`${value}T00:00:00Z`) : null;
+  if (!day || Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== value) {
+    throw new Error(
+      "TRAIL_COVERAGE_FROM must be the date you first deployed a version that records the consent " +
+        `trail, as YYYY-MM-DD, got: ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
 module.exports = {
   FIDUCIARY,
   assertConfigured,
+  trailCoverageFrom,
   contactBlock,
   // Functions - always read the catalog live, so a runtime customisation is
   // reflected immediately rather than needing a process restart (M3).

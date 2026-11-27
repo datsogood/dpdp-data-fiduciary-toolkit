@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { withDb } = require("./helpers/db");
+const { withEnv } = require("./helpers/env");
 
 process.env.PRINCIPAL_ID_SECRET = "test-secret-not-for-production-min32chars";
 const { buildModels } = require("../src/models");
@@ -15,7 +16,6 @@ const { lookupHash } = require("../src/utils/principalId");
 const { assertOpaqueRef } = require("../src/utils/validate");
 const { getValidConsentTypes } = require("../src/config/catalog");
 const {
-  COVERAGE_FROM,
   recordTrail,
   getConsentTrail,
   findConsentTrailByContact,
@@ -196,7 +196,7 @@ test("the twelve-act timeline reads back exactly, newest first, in one shape", a
 
     assert.equal(trail.principalId, principalId);
     assert.equal(trail.docRef, record.docRef);
-    assert.equal(trail.coverageFrom, COVERAGE_FROM, "a trail must be able to say when we started recording, or an empty one implies nothing happened");
+    assert.equal(trail.coverageFrom, process.env.TRAIL_COVERAGE_FROM, "a trail must be able to say when we started recording, or an empty one implies nothing happened");
     assert.equal(trail.totalEntries, 12, "twelve MERGED entries - a count of stored rows alone would have said three");
     assert.equal(trail.truncated, false);
   });
@@ -353,7 +353,7 @@ test("a principal with no stored entries still gets their derived ledger - an em
       ["analytics", "marketing", "underwriting", "identity_verification", "kyc_reporting"],
       "one submission, one timestamp - so the order is array position descending"
     );
-    assert.equal(trail.coverageFrom, COVERAGE_FROM);
+    assert.equal(trail.coverageFrom, process.env.TRAIL_COVERAGE_FROM);
   });
 });
 
@@ -649,7 +649,7 @@ test("findConsentTrailByContact resolves an email to a whole trail, and answers 
     const trail = await findConsentTrailByContact({ models, email: "  ASHA@example.com " });
     assert.equal(trail.principalId, principalId, "lookupHash normalises case and surrounding whitespace, so a hand-typed address still matches");
     assert.equal(trail.docRef, record.docRef);
-    assert.equal(trail.coverageFrom, COVERAGE_FROM);
+    assert.equal(trail.coverageFrom, process.env.TRAIL_COVERAGE_FROM);
     assert.equal(trail.totalEntries, 5, "the same object getConsentTrail returns - this function resolves an identity, it does not shape a different read");
 
     assert.equal(
@@ -674,4 +674,26 @@ test("findConsentTrailByContact keeps the 409 on an ambiguous phone - a househol
       "findPrincipalByContact refuses to guess which household member a number belongs to, and answering with an arbitrary one of their trails would disclose the wrong person's whole lineage"
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// coverageFrom comes from the deployment, not the library
+// ---------------------------------------------------------------------------
+
+test("coverageFrom is whatever TRAIL_COVERAGE_FROM says when the trail is read", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+    const trail = await withEnv("TRAIL_COVERAGE_FROM", "2027-01-15", () => getConsentTrail({ models, principalId }));
+    assert.equal(trail.coverageFrom, "2027-01-15", "the deployment's own start date, not one built into the library");
+  });
+});
+
+test("getConsentTrail fails before any query when TRAIL_COVERAGE_FROM is unset", async () => {
+  // Every model access throws, so the only way to reject with the config
+  // error is to check the setting before touching the database.
+  const untouchable = new Proxy({}, { get: () => { throw new Error("queried the database"); } });
+  await withEnv("TRAIL_COVERAGE_FROM", undefined, () =>
+    assert.rejects(getConsentTrail({ models: untouchable, principalId: "a".repeat(64) }), /TRAIL_COVERAGE_FROM/)
+  );
 });

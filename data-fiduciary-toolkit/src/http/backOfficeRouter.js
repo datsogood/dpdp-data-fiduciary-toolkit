@@ -56,7 +56,8 @@ function createBackOfficeRouter({ db, resolveOperator, rateLimitedByHost, allowe
   }
   // Same boot gate createRouter uses. It is not the DPO address that matters
   // here - it is PRINCIPAL_ID_SECRET, which lookupHash needs on the very first
-  // lookup. Unset, this router builds fine and then 500s on the first search.
+  // lookup, and TRAIL_COVERAGE_FROM, which every trail read returns. Without
+  // the gate this router would build fine and then fail on the first request.
   assertConfigured();
   const models = buildModels(db);
 

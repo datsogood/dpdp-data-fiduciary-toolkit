@@ -1,16 +1,7 @@
-const { getValidConsentTypes } = require("../config/catalog");
+const { getValidConsentTypes, trailCoverageFrom } = require("../config/catalog");
 const { assertOpaqueRef, assertPrincipalId } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
 const { findPrincipalByContact } = require("../utils/principalId");
-
-// The date this feature shipped. The trail is not retroactive and no backfill
-// is possible or permitted, so a read returns this verbatim: a trail with
-// nothing in it says "we were not recording before this date" rather than
-// implying nothing happened. A module constant, not a stored marker row -
-// a marker row cannot be written against a schema whose `actor` and `outcome`
-// are both required, and under the fail-open rule below that failure would
-// have been silent.
-const COVERAGE_FROM = "2026-09-04";
 
 // The honest default. `unattributed` is NOT a synonym for `system`: it means
 // the library genuinely does not know who acted, and claiming otherwise would
@@ -261,6 +252,9 @@ function byRecency(a, b) {
 async function getConsentTrail({ models, principalId, limit = DEFAULT_LIMIT, includeOperatorRefs = false }) {
   assertPrincipalId(principalId);
   const max = assertLimit(limit);
+  // Before any query: a deployment that never said when it started recording
+  // gets the configuration error, not a trail with no start date.
+  const coverageFrom = trailCoverageFrom();
 
   // Plain equality filters, .sort() and .limit() only. sanitizeFilter makes
   // an operator filter CastError, so {at: {$gte: d}} is not available to this
@@ -383,11 +377,10 @@ async function getConsentTrail({ models, principalId, limit = DEFAULT_LIMIT, inc
     // Null only if a principal exists with no consent record at all. The
     // trail read does not require a ledger to be able to answer.
     docRef: record ? record.docRef : null,
-    // A module constant, returned verbatim. It exists so a trail with nothing
-    // in it can say "we were not recording before this date" rather than
-    // implying nothing happened. See COVERAGE_FROM above for why it is not a
-    // stored marker row.
-    coverageFrom: COVERAGE_FROM,
+    // The deployment's TRAIL_COVERAGE_FROM, so a trail with nothing in it says
+    // "we were not recording before this date" rather than implying nothing
+    // happened. The trail is not retroactive and nothing backfills it.
+    coverageFrom,
     timeline,
     truncated: totalEntries > timeline.length,
     totalEntries,
@@ -434,7 +427,6 @@ async function findConsentTrailByContact({ models, email, phone }) {
 }
 
 module.exports = {
-  COVERAGE_FROM,
   UNATTRIBUTED,
   recordTrail,
   recordTrailStrict,
