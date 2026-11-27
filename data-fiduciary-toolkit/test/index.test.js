@@ -11,17 +11,15 @@ test("the documented public API is all exported", () => {
     "complaintToTheBoard", "escalateToBoard", "consentManagerRequest",
     "erasePrincipalPII",
     "advanceRightsRequest", "advanceGrievance", "advanceConsentManagerRequest",
-    // getRightsRequest and getGrievance were dropped from this list in the
-    // first pass of this task, then restored in fix round 1: the brief's own
-    // list predates Task 10's item-level readers, so following it literally
-    // removed a real capability (list a principal's requests but never fetch
-    // the one refId they were actually given). See the structural test below,
-    // which exists so this specific mistake cannot recur silently.
+    // getRightsRequest and getGrievance must stay on this list: without them
+    // a host can list a principal's requests but never fetch the one refId
+    // they were actually given. See the structural test below, which exists
+    // so dropping them cannot happen silently.
     "listRightsRequests", "getRightsRequest",
     "listGrievances", "getGrievance",
     "listConsentManagerRequests",
     "buildNotice", "newPrincipalId",
-    // Restored in the same fix round: the building block for a host's own
+    // The building block for a host's own
     // sign-in (turn a verified contact detail into a principalId), used by
     // examples/server.js's demo login and needed by anyone doing the same
     // thing for real.
@@ -39,7 +37,7 @@ test("derivePrincipalId is gone - it was the guessable-identity bug", () => {
 });
 
 /**
- * Structural guard against the exact mistake fix round 1 corrected: a
+ * Structural guard against dropping a reader by mistake: a
  * hardcoded name list only catches drift the person editing it thought to
  * check for. This instead walks each service module's OWN exports, and
  * wherever a module exports both a list* reader and the matching get* one

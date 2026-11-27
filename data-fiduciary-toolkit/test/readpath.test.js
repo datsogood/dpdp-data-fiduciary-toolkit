@@ -109,7 +109,7 @@ test("GET /consent carries Cache-Control: no-store and Vary: Cookie - PII must n
 
 /**
  * Boots an app authenticated as one fixed principal and returns a small
- * fetch helper - the property below is the whole point of this task, so it
+ * fetch helper - the property below is the whole point of these tests, so it
  * is exercised against every read route the router now has, not just
  * GET /consent.
  */

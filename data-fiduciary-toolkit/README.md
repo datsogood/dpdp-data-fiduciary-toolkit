@@ -631,7 +631,7 @@ functions, for the reason given in "Correcting contact details" above. The
 `escalateToBoard` note earlier in "The APIs" (it contacts no one) and the
 parental-consent limitation above it (no minor can register over HTTP at
 all) are the same kind of gap as the first four, recorded the same way. For
-the underlying finding-by-finding audit this branch worked against, see
-[`docs/superpowers/plans/2026-08-07-dpdp-audit-remediation/spec.md`](https://github.com/datsogood/dpdp-data-fiduciary-toolkit/blob/main/docs/superpowers/plans/2026-08-07-dpdp-audit-remediation/spec.md)
+the finding-by-finding audit behind these changes, see
+[`docs/audit/2026-08-07-code-review.md`](https://github.com/datsogood/dpdp-data-fiduciary-toolkit/blob/main/docs/audit/2026-08-07-code-review.md)
 in the repository - it is not reproduced here because a fixed-in-time coverage
 table next to living code drifts the moment either one changes.

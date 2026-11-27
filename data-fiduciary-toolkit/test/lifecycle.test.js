@@ -49,8 +49,8 @@ test("a grievance can reach resolved, which makes the resolved guard reachable",
       () => escalateToBoard({ models, refId: "GR-1", principalId: PID }),
       (e) => /resolved/i.test(e.message)
     );
-    // Assert the stored value, not the return value - Grievance had no
-    // 'resolution' schema path before this task, so under Mongoose strict
+    // Assert the stored value, not the return value - Grievance once had
+    // no 'resolution' schema path, so under Mongoose strict
     // mode the assignment would be silently dropped with no error.
     const row = await models.Grievance.findOne({ refId: "GR-1" });
     assert.equal(row.resolution, "Calls stopped");
@@ -124,8 +124,8 @@ test("a resolved grievance's resolution is visible on the principal-facing read 
   });
 });
 
-// Same gap, same fix, same reasoning - RightsRequest gained resolution in
-// this task too, and getRightsRequest predates that field.
+// Same gap, same fix, same reasoning - RightsRequest gained resolution at
+// the same time, and getRightsRequest predates that field.
 test("a closed rights request's resolution is visible on the principal-facing read path", async () => {
   await withDb(async (conn) => {
     const models = buildModels(conn);
