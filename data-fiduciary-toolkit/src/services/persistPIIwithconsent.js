@@ -3,7 +3,7 @@ const { findOrCreatePrincipal, generateDocRef } = require("../utils/principalId"
 const { assertStringArray, assertPrincipalId } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
 const { ageInYears, ADULT_AGE } = require("../utils/age");
-const { recordTrail, UNATTRIBUTED } = require("./consentTrail");
+const { recordTrail, resolveActor } = require("./consentTrail");
 
 /**
  * Verifiable parental consent, as far as this library can check it: a named
@@ -69,11 +69,15 @@ function isVerifiedParentalConsent(parentalConsent) {
  * @param {object}   [input.actor] - who is acting, for the AUDIT TRAIL ONLY. Defaults
  *   to UNATTRIBUTED, which is not a synonym for "system": a direct service call
  *   genuinely does not tell this library who is behind it, and claiming otherwise
- *   would be a claim it cannot back. Nothing about the consent decision, the
- *   ledger, or the returned object depends on this value.
+ *   would be a claim it cannot back. A malformed actor is refused with a 400
+ *   before anything is read or written; otherwise nothing about the consent
+ *   decision, the ledger, or the returned object depends on this value.
  * @returns {Promise<{ docRef, receiptId, principalId, created, events, state, refusedForChild }>}
  */
-async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, parentalConsent, principalId, actor = UNATTRIBUTED } = {}) {
+async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, parentalConsent, principalId, actor } = {}) {
+  // First, so a bad actor stops the call instead of losing its trail entry.
+  actor = resolveActor(actor);
+
   // Omitting consentTypes and submitting [] are different acts: the first is
   // "no consent decision was made", the second is "I decline everything".
   //

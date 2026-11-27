@@ -685,6 +685,18 @@ for example a `Grievance` can go `open -> in_progress -> resolved`, but not
 straight to `escalated`: only `escalateToBoard` can reach that state, because
 it is the only path that checks the SLA has actually lapsed first.
 
+These, `withdrawConsent`, `escalateToBoard`, `persistPIIwithconsent` and
+`updatePrincipalContact` all take an optional `actor` - `{ role, channel, ref }`,
+for example `{ role: "operator", channel: "api", ref: "staff-4471" }`. `ref`
+is an opaque id string (letters, digits, `.`, `_`, `:` or `-`), never an email
+address. The actor is stored on the entries the call itself writes, such as
+every status change and contact correction, and the refusals and no-ops of the
+consent, withdrawal and escalation calls. A grant, withdrawal or escalation
+that takes effect is read from its own collection, which does not record who
+acted, so it shows as `unattributed`, as does any entry written without an
+actor. A malformed actor is refused with a `400` before anything changes, so a
+bad `ref` cannot let the act through and lose its entry.
+
 ## Notice - `buildNotice`
 
 Section 5 requires an itemised notice - what personal data, for what

@@ -2,6 +2,7 @@ const { getValidConsentTypes, trailCoverageFrom } = require("../config/catalog")
 const { assertOpaqueRef, assertPrincipalId } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
 const { findPrincipalByContact } = require("../utils/principalId");
+const { ACTOR_ROLES, ACTOR_CHANNELS } = require("../models/TrailEntry");
 
 // The honest default. `unattributed` is NOT a synonym for `system`: it means
 // the library genuinely does not know who acted, and claiming otherwise would
@@ -11,6 +12,34 @@ const { findPrincipalByContact } = require("../utils/principalId");
 // ready-made SYSTEM sitting beside UNATTRIBUTED invites precisely the swap
 // this comment exists to prevent.
 const UNATTRIBUTED = { role: "unattributed", channel: "library" };
+
+/**
+ * Checks a caller-supplied actor and returns a new object holding only role,
+ * channel and ref. Omitted (undefined or null) gives UNATTRIBUTED itself.
+ *
+ * Every service that takes an actor calls this before doing any work. Left
+ * to recordTrail, a malformed actor was swallowed by the fail-open writer:
+ * the act went through and its trail entry was silently lost. It is the
+ * caller's mistake, so it is a 400 before anything changes.
+ *
+ * Each field is read once, so a getter cannot answer one way when checked
+ * and another when stored.
+ */
+function resolveActor(actor) {
+  if (actor === undefined || actor === null) return UNATTRIBUTED;
+  if (typeof actor !== "object" || Array.isArray(actor)) {
+    throw new AppError("actor must be an object with a role and a channel", 400);
+  }
+  const { role, channel, ref } = actor;
+  if (!ACTOR_ROLES.includes(role)) {
+    throw new AppError(`actor.role must be one of ${ACTOR_ROLES.join(", ")}`, 400);
+  }
+  if (!ACTOR_CHANNELS.includes(channel)) {
+    throw new AppError(`actor.channel must be one of ${ACTOR_CHANNELS.join(", ")}`, 400);
+  }
+  if (ref === undefined) return { role, channel };
+  return { role, channel, ref: assertOpaqueRef(ref, "actor.ref") };
+}
 
 /**
  * Logs a lost trail write with err.name and err.code and NOTHING else.
@@ -428,6 +457,7 @@ async function findConsentTrailByContact({ models, email, phone }) {
 
 module.exports = {
   UNATTRIBUTED,
+  resolveActor,
   recordTrail,
   recordTrailStrict,
   getConsentTrail,

@@ -1,6 +1,6 @@
 const { assertNonEmptyString } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
-const { recordTrail, UNATTRIBUTED } = require("./consentTrail");
+const { recordTrail, resolveActor } = require("./consentTrail");
 
 /**
  * Fiduciary-side status transitions.
@@ -40,9 +40,12 @@ function assertTransition(map, from, to, kind) {
  * error messages ("rights request"); the trail's own kind is the literal
  * "request_status_changed" below, and the two are not related.
  */
-async function advance({ models, model, map, kind, refId, status, resolution, extraFields = {}, actor = UNATTRIBUTED }) {
+async function advance({ models, model, map, kind, refId, status, resolution, extraFields = {}, actor }) {
   assertNonEmptyString(refId, "refId", 64);
   assertNonEmptyString(status, "status", 32);
+  // Before the transition, so a bad actor stops it instead of letting it
+  // persist without its trail entry.
+  actor = resolveActor(actor);
   const row = await model.findOne({ refId });
   if (!row) throw new AppError(`No ${kind} found with that reference`, 404);
   assertTransition(map, row.status, status, kind);
