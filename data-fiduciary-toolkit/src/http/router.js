@@ -12,6 +12,7 @@ const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = requ
 const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
 const { listConsentManagerRequests } = consentManagerRequest;
+const { recordTrail } = require("../services/consentTrail");
 const {
   escapeHtml,
   renderRightsPage,
@@ -65,6 +66,15 @@ function readPii(body) {
 function isTrue(value) {
   return value === true || value === "true" || value === "on" || value === "1";
 }
+
+/**
+ * Who a principal-facing trail row is attributed to. Identity itself still
+ * comes only from resolvePrincipal - this says nothing about WHO, only that
+ * the actor is the data principal and which surface they reached us on. The
+ * channel matters because an HTML refusal and an API refusal are different
+ * failures to answer for: one was read by a person on a page.
+ */
+const principalActor = (req) => ({ role: "principal", channel: wantsHtml(req) ? "html" : "api" });
 
 /** Wraps an async handler so a rejection reaches the error mapper below. */
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -257,7 +267,8 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   }
 
   /**
-   * Refuses contact details that are not the signed-in principal's own.
+   * The contact fields supplied that are NOT the signed-in principal's own, or
+   * null when everything matches.
    *
    * persistPIIwithconsent resolves a principal through findOrCreatePrincipal,
    * i.e. by contact hash. Passing a caller-supplied email into it would let any
@@ -265,17 +276,21 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
    * again, merely requiring an account. Comparing against the session
    * principal's own stored hash refuses that without a lookup, so it also adds
    * no way to probe which addresses are registered.
+   *
+   * It returns rather than throwing, and is named for what it returns, because
+   * the refusal now also writes a trail entry and that write is asynchronous.
+   * Making an assert-named helper async would leave a synchronous call site
+   * calling it without await, and a returned promise is truthy but never
+   * throws: the 403 would silently stop happening, the write would land on the
+   * victim, and the unhandled rejection would take the process down on every
+   * mismatched request. Keeping the check synchronous and moving both the
+   * write and the throw into the async handler makes that mistake unavailable.
    */
-  function assertOwnContact(principal, pii) {
-    const mismatch =
-      (pii.email && lookupHash(pii.email) !== principal.emailHash) ||
-      (pii.phone && lookupHash(pii.phone) !== principal.phoneHash);
-    if (mismatch) {
-      throw new AppError(
-        "The contact details supplied do not belong to the signed-in data principal. Use the correction route to change them.",
-        403
-      );
-    }
+  function ownContactMismatch(principal, pii) {
+    const fields = [];
+    if (pii.email && lookupHash(pii.email) !== principal.emailHash) fields.push("email");
+    if (pii.phone && lookupHash(pii.phone) !== principal.phoneHash) fields.push("phone");
+    return fields.length ? fields : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -320,7 +335,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       }
       const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
       const result = await persistPIIwithconsent({
-        models, pii, consentTypes: readConsentTypes(req.body), notice,
+        models, pii, consentTypes: readConsentTypes(req.body), notice, actor: principalActor(req),
       });
       // The receipt page is how a browser user obtains their principalId at
       // all - it is otherwise only ever returned in a JSON body, which is
@@ -352,9 +367,42 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       // erased record would fail later with a confusing message about a
       // missing name rather than saying what actually happened.
       if (principal.erasedAt) {
+        // Recorded before the throw. Erasure is terminal, so this refusal is
+        // the last thing that will ever happen on this record, and it is
+        // thrown before any write - nothing else keeps it.
+        await recordTrail(models, {
+          principalId: req.principalId,
+          kind: "consent_refused",
+          outcome: "refused",
+          reasonCode: "record_erased",
+          actor: principalActor(req),
+        });
         throw new AppError("This data principal's record has been erased and cannot be updated", 409);
       }
-      assertOwnContact(principal, readPii(req.body));
+      const mismatched = ownContactMismatch(principal, readPii(req.body));
+      if (mismatched) {
+        // Awaited, and before the throw. recordTrail is fail-open and never
+        // rejects, so this cannot turn a 403 the caller needs to read into a
+        // 500. Only the NUMBER of mismatched fields is stored: the trail holds
+        // no contact detail, and which field it was does not make the refusal
+        // any more accountable.
+        await recordTrail(models, {
+          principalId: req.principalId,
+          kind: "contact_mismatch_refused",
+          outcome: "refused",
+          reasonCode: "not_own_contact",
+          // principalActor is already at module scope for exactly this.
+          // Re-inlining the object literal would give this file two
+          // definitions of what a principal actor is, and the one that
+          // drifted would be whichever a later reader did not open.
+          actor: principalActor(req),
+          count: mismatched.length,
+        });
+        throw new AppError(
+          "The contact details supplied do not belong to the signed-in data principal. Use the correction route to change them.",
+          403
+        );
+      }
 
       const notice = buildNotice({ language: req.query.lang || DEFAULT_NOTICE_LANGUAGE });
       const result = await persistPIIwithconsent({
@@ -368,6 +416,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
         consentTypes: readConsentTypes(req.body),
         regrant: isTrue(req.body.regrant),
         notice,
+        actor: principalActor(req),
       });
       res.status(200).json(result);
     })

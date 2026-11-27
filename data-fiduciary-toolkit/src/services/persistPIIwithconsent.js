@@ -3,6 +3,7 @@ const { findOrCreatePrincipal, generateDocRef } = require("../utils/principalId"
 const { assertStringArray, assertPrincipalId } = require("../utils/validate");
 const { AppError } = require("../utils/errors");
 const { ageInYears, ADULT_AGE } = require("../utils/age");
+const { recordTrail, UNATTRIBUTED } = require("./consentTrail");
 
 /**
  * Verifiable parental consent, as far as this library can check it: a named
@@ -65,9 +66,14 @@ function isVerifiedParentalConsent(parentalConsent) {
  *   would MINT A NEW PRINCIPAL carrying the old one's PII, return the new id to
  *   the caller, and append the consent event to a forked ledger, orphaning the
  *   original record with live PII.
+ * @param {object}   [input.actor] - who is acting, for the AUDIT TRAIL ONLY. Defaults
+ *   to UNATTRIBUTED, which is not a synonym for "system": a direct service call
+ *   genuinely does not tell this library who is behind it, and claiming otherwise
+ *   would be a claim it cannot back. Nothing about the consent decision, the
+ *   ledger, or the returned object depends on this value.
  * @returns {Promise<{ docRef, receiptId, principalId, created, events, state, refusedForChild }>}
  */
-async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, parentalConsent, principalId } = {}) {
+async function persistPIIwithconsent({ models, pii, consentTypes, regrant = false, notice, parentalConsent, principalId, actor = UNATTRIBUTED } = {}) {
   // Omitting consentTypes and submitting [] are different acts: the first is
   // "no consent decision was made", the second is "I decline everything".
   //
@@ -127,6 +133,23 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
   }
 
   if (isMinor && !isVerifiedParentalConsent(effectiveParentalConsent)) {
+    // Written BEFORE the throw, because the throw IS the record: this 422
+    // leaves no Principal and no ConsentRecord behind by design, so without
+    // this row nothing anywhere says a child was turned away.
+    //
+    // principalId is present only on the AUTHENTICATED branch, where the
+    // principal was loaded above. On the SIGNUP branch the gate deliberately
+    // runs before findOrCreatePrincipal, so there is no subject at all and the
+    // row is written with principalId absent - `principal` is the only honest
+    // source for it, since the parameter can be any falsy value the caller
+    // passed and "" would store a subject-shaped hole.
+    await recordTrail(models, {
+      principalId: principal ? principal.principalId : undefined,
+      kind: "age_gate_refused",
+      outcome: "refused",
+      reasonCode: "parental_consent_required",
+      actor,
+    });
     throw new AppError("Verifiable parental consent is required before processing a child's personal data", 422);
   }
 
@@ -179,6 +202,7 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
   const decideFor = (state) => {
     const events = [];
     const refused = [];
+    const suppressed = [];
     for (const entry of getCatalog()) {
       // Parental consent unlocks nothing here: behavioural advertising and
       // tracking aimed at a child are refused outright, not merely
@@ -189,6 +213,26 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
       }
       const current = state[entry.type] ? state[entry.type].status : undefined;
       const target = decide({ entry, current, chosen, consentSubmitted, regrant });
+      // The one silent no-op in the state table: a re-grant of a WITHDRAWN
+      // purpose submitted without regrant: true. decide() returns null for it
+      // (see the `current === "withdrawn"` line in decide below), the caller
+      // gets a 200 and a receipt naming no event, and nothing else records
+      // that they asked at all. The condition is restated here rather than
+      // reported by decide(), because decide() is pure, its return type is a
+      // status or null, and 23 tests pin it.
+      //
+      // `!target` confirms decide() really returned null rather than a status
+      // that happens to equal `current`. The lawfulBasis check keeps this in
+      // exact step with decide's own early return for legitimate_use.
+      if (
+        !target &&
+        entry.lawfulBasis.kind === "consent" &&
+        current === "withdrawn" &&
+        chosen.includes(entry.type) &&
+        !regrant
+      ) {
+        suppressed.push(entry.type);
+      }
       if (!target || target === current) continue;
       events.push({
         type: entry.type,
@@ -203,7 +247,7 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
         noticeVersion: notice ? notice.version : undefined,
       });
     }
-    return { events, refused };
+    return { events, refused, suppressed };
   };
 
   // A lightweight pointer only - the evidence itself is the NoticeVersion row
@@ -231,7 +275,7 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     });
   }
 
-  let { events: newEvents, refused: refusedForChild } = decideFor(record.currentState());
+  let { events: newEvents, refused: refusedForChild, suppressed } = decideFor(record.currentState());
   if (newEvents.length) {
     record.events.push(...newEvents);
   }
@@ -256,7 +300,7 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     if (!winner) throw err;
 
     record = winner;
-    ({ events: newEvents, refused: refusedForChild } = decideFor(record.currentState()));
+    ({ events: newEvents, refused: refusedForChild, suppressed } = decideFor(record.currentState()));
     if (newEvents.length) {
       record.events.push(...newEvents);
     }
@@ -267,6 +311,65 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
     // dropped, taking the evidence that notice was given with it.
     snapshotNotice(record);
     await record.save();
+  }
+
+  // Instrumentation. Everything above is unchanged and nothing above depends
+  // on any of it.
+  //
+  // It runs AFTER the save for two reasons. A submission that failed to save
+  // must leave no trail row claiming it happened; and the duplicate-key
+  // recovery above recomputes all three lists against the WINNING document,
+  // so by here they are already the truthful ones. Recording inside decideFor,
+  // or before the try, would double-write every row on the recovery path.
+
+  if (refusedForChild.length) {
+    await recordTrail(models, {
+      principalId,
+      kind: "consent_refused",
+      outcome: "refused",
+      reasonCode: "prohibited_for_child",
+      actor,
+      // ONE row naming N purposes, never N rows. An authenticated principal
+      // can otherwise force roughly 17,000 inserts from one 100kb request.
+      consentTypes: refusedForChild,
+      count: refusedForChild.length,
+      receiptId,
+    });
+  }
+
+  if (suppressed.length) {
+    await recordTrail(models, {
+      principalId,
+      kind: "consent_not_applied",
+      outcome: "no_change",
+      reasonCode: "regrant_not_requested",
+      actor,
+      consentTypes: suppressed,
+      count: suppressed.length,
+      receiptId,
+    });
+  }
+
+  // decide() returns "withdrawn" for exactly one reason: a purpose the caller
+  // OMITTED from a submission that carried a consent decision. That withdrawal
+  // is in the ledger, so it is derived at read time and is never copied here.
+  // What is recorded nowhere at all is that the host was not told: this
+  // function has no onWithdrawal parameter and the router passes none, so the
+  // cease-processing pipeline never runs. It is the fact a fiduciary most
+  // needs, because it names a Section 6(6) duty that may have gone
+  // undischarged - and recording that the hook did not fire is not the same as
+  // firing it. See the README's residuals.
+  const withdrawnByOmission = newEvents.filter((e) => e.status === "withdrawn").map((e) => e.type);
+  if (withdrawnByOmission.length) {
+    await recordTrail(models, {
+      principalId,
+      kind: "withdrawal_hook_not_fired",
+      outcome: "recorded",
+      actor,
+      consentTypes: withdrawnByOmission,
+      count: withdrawnByOmission.length,
+      receiptId,
+    });
   }
 
   return {
