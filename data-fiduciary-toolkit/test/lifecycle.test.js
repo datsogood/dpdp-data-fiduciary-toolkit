@@ -226,3 +226,84 @@ test("an illegal transition records nothing - a stored transition is only ever o
       "the transition did not happen, so nothing may record that it did");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Refused escalations. Nothing is written when one is refused - the grievance
+// is not saved and the 409 is the only output - so a fiduciary asked why a
+// person never reached the Board would otherwise have nothing to answer with.
+// ---------------------------------------------------------------------------
+
+test("an escalation refused because the grievance is resolved is recorded", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const past = new Date(Date.now() - 86400000);
+    await models.Grievance.create({
+      principalId: PID, refId: "GR-RES", subject: "s", description: "d", addressedTo: "DPO",
+      status: "resolved", slaDueAt: past,
+    });
+
+    await assert.rejects(
+      () => escalateToBoard({ models, refId: "GR-RES", principalId: PID }),
+      (e) => e.status === 409
+    );
+
+    const rows = await models.TrailEntry.find({ principalId: PID, kind: "escalation_refused" }).lean();
+    assert.equal(rows.length, 1, "a refused escalation writes nothing anywhere else, so this row is the only record");
+    assert.equal(rows[0].outcome, "refused");
+    assert.equal(rows[0].reasonCode, "already_resolved");
+    assert.equal(rows[0].refId, "GR-RES");
+    assert.equal(rows[0].actor.role, "unattributed");
+  });
+});
+
+test("a second escalation is refused as already_escalated, and the first one stores nothing", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const past = new Date(Date.now() - 86400000);
+    await models.Grievance.create({
+      principalId: PID, refId: "GR-TWICE", subject: "s", description: "d", addressedTo: "DPO",
+      status: "open", slaDueAt: past,
+    });
+
+    await escalateToBoard({ models, refId: "GR-TWICE", principalId: PID });
+    assert.equal(await models.TrailEntry.countDocuments({ principalId: PID }), 0,
+      "an escalation that took effect stamps escalatedAt, so it is derived at read time and stored nowhere");
+
+    await assert.rejects(
+      () => escalateToBoard({ models, refId: "GR-TWICE", principalId: PID }),
+      (e) => e.status === 409
+    );
+
+    const rows = await models.TrailEntry.find({ principalId: PID, kind: "escalation_refused" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].reasonCode, "already_escalated");
+    assert.equal(rows[0].outcome, "refused");
+  });
+});
+
+test("an escalation refused because the SLA has not lapsed is recorded, with a supplied actor carried through", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const future = new Date(Date.now() + 86400000);
+    await models.Grievance.create({
+      principalId: PID, refId: "GR-EARLY", subject: "s", description: "d", addressedTo: "DPO",
+      status: "open", slaDueAt: future,
+    });
+
+    await assert.rejects(
+      () => escalateToBoard({
+        models, refId: "GR-EARLY", principalId: PID,
+        actor: { role: "principal", channel: "html" },
+      }),
+      (e) => e.status === 409
+    );
+
+    const rows = await models.TrailEntry.find({ principalId: PID, kind: "escalation_refused" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].reasonCode, "sla_not_lapsed");
+    assert.equal(rows[0].actor.role, "principal");
+    assert.equal(rows[0].actor.channel, "html");
+    assert.doesNotMatch(JSON.stringify(rows[0]), /lapsed yet|not yet lapsed|Grievance Officer/i,
+      "the row carries a reason code and a reference, never the sentence the person was shown");
+  });
+});
