@@ -159,8 +159,8 @@ test("an internal fault is 500 with a generic body, not 400 with the raw message
         resolvePrincipal: () => principalId,
         // Force an internal fault from inside a handler.
         //
-        // Must be onWithdrawal, NOT onGrievanceFiled. Task 5 made the grievance
-        // hook non-fatal on purpose: a throwing host callback used to produce a
+        // Must be onWithdrawal, NOT onGrievanceFiled. The grievance hook is
+        // non-fatal on purpose: a throwing host callback used to produce a
         // generic 500 and the data principal never learned their refId, so they
         // re-filed and created a duplicate grievance. onWithdrawal is
         // deliberately still fatal - it is how the host learns it must cease

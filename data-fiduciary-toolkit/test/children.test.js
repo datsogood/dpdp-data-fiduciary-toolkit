@@ -40,7 +40,7 @@ test("ageInYears handles a leap-year (29 February) birthday", () => {
 });
 
 // Hand-verification across timezones caught a real bug that this machine's own
-// timezone could not (see task-9-report.md, fix round 1). Spawn one subprocess
+// timezone could not. Spawn one subprocess
 // per timezone with TZ set at process start, since Node resolves the timezone
 // once at startup - a runtime assignment to process.env.TZ does not reliably
 // take effect.

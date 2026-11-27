@@ -31,8 +31,8 @@ const ALLOWED_S7_CLAUSES = [
 // public order) - neither one is gated to government actors in the text, so
 // a private hospital or a private disaster-relief operator can rely on them
 // just as a private lender can rely on 7(d). Excluding them without a
-// textual basis would repeat the same class of error this task exists to
-// correct, just in the other direction - treating a private-capable clause
+// textual basis would repeat the same class of error this list exists to
+// prevent, just in the other direction - treating a private-capable clause
 // as State-only instead of a State-only clause as private-capable.
 const PRIVATE_FIDUCIARY_S7_CLAUSES = [
   "Section 7(a)", "Section 7(d)", "Section 7(e)", "Section 7(f)",

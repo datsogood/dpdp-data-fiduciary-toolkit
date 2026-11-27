@@ -6,7 +6,7 @@ Scope: the whole repo - 20 tracked files, ~834 lines under `data-fiduciary-toolk
 
 Method: every file read end to end, then a four-lens parallel audit (security, correctness,
 DPDP legal fidelity, repo hygiene) with an adversarial refutation pass over every claim and
-a completeness critic pass. 9 agents, 145 tool calls. 44 findings survived refutation, 8 new
+a completeness critic pass. 44 findings survived refutation, 8 new
 findings came from the critic, 2 were refuted and dropped. Runtime behaviour was verified by
 execution rather than asserted from memory wherever it was load-bearing; section 6 records
 what was tested and what the audit corrected.

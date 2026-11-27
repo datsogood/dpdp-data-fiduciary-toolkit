@@ -50,7 +50,7 @@ function isVerifiedParentalConsent(parentalConsent) {
  * @param {object}   input.pii              - { name, email?, phone?, dob, pan?, address? }
  * @param {string[]} [input.consentTypes]   - omit entirely for a PII-only update
  * @param {boolean}  [input.regrant]        - allow reversing a prior withdrawal
- * @param {object}   [input.notice]         - Section 5 notice snapshot (Task 8)
+ * @param {object}   [input.notice]         - Section 5 notice snapshot, from buildNotice
  * @param {object}   [input.parentalConsent] - { name, email, relationship, verifiedAt } - server-side only, see above.
  *   Optional on the principalId branch: the record written at registration is
  *   used when the caller passes none, so a registered minor is not locked out
@@ -391,7 +391,7 @@ async function persistPIIwithconsent({ models, pii, consentTypes, regrant = fals
   };
 }
 
-/** Implements the state table in the plan. Returns the target status, or null for no change. */
+/** The consent state table: the next status for one purpose, or null for no change. */
 function decide({ entry, current, chosen, consentSubmitted, regrant }) {
   // A legitimate use does not depend on choice - record it once, for notice.
   if (entry.lawfulBasis.kind === "legitimate_use") return current ? null : "granted";

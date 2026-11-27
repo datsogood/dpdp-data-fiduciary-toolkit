@@ -206,7 +206,8 @@ const CONSENT_CATALOG = [
     withdrawable: true,
     // Behavioural advertising to a child is exactly what Section 9 restricts
     // - so this purpose must be an explicit false-by-decision, not a
-    // false-by-accident omission that Task 9's branching would silently trust.
+    // false-by-accident omission that the child-refusal branch would silently
+    // trust.
     prohibitedForChildren: true,
     retentionMonths: 24,
   },

@@ -186,7 +186,7 @@ test("a contact correction cannot steal another principal's email", async () => 
 test("resubmitting your own unchanged phone number does not 409 - a shared handset must not lock out corrections", async () => {
   // phoneHash is deliberately non-unique, so a phone clash between two
   // legitimate household members is not an error. Confirms the fix for the
-  // lockout the reviewer reproduced: correcting an unrelated field (name)
+  // household lockout: correcting an unrelated field (name)
   // while re-submitting the same phone must succeed, not 409.
   await withDb(async (conn) => {
     const models = buildModels(conn);
