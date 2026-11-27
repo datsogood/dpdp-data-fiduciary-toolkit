@@ -26,6 +26,10 @@ test("the documented public API is all exported", () => {
     // examples/server.js's demo login and needed by anyone doing the same
     // thing for real.
     "findPrincipalByContact",
+    // The consent audit trail. getConsentTrail is the read; the other two are
+    // the surfaces built on it - one deliberately unmounted, one a router the
+    // host mounts separately behind its own staff auth.
+    "getConsentTrail", "findConsentTrailByContact", "createBackOfficeRouter",
     "CONSENT_CATALOG", "RIGHTS_CATALOG", "FIDUCIARY",
   ];
   for (const name of expected) {
