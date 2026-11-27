@@ -12,7 +12,7 @@ const { listRights, exerciseRight, listRightsRequests, getRightsRequest } = requ
 const { complaintToTheBoard, escalateToBoard, listGrievances, getGrievance } = require("../services/complaintToTheBoard");
 const consentManagerRequest = require("../services/consentManagerRequest");
 const { listConsentManagerRequests } = consentManagerRequest;
-const { recordTrail } = require("../services/consentTrail");
+const { getConsentTrail, recordTrail, assertLimit } = require("../services/consentTrail");
 const {
   escapeHtml,
   renderRightsPage,
@@ -251,14 +251,20 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
   }
 
   /**
-   * These six routes are the first cacheable responses in the toolkit that
-   * carry personal data - every pre-existing PII route is POST or PUT, and
-   * neither is cacheable by default. GET /consent in particular returns
-   * name, email, phone, dob, PAN and address on a URL with no
-   * user-identifying component, distinguished only by the host's session
-   * cookie: a shared cache or CDN in front of the host, or a browser's disk
-   * or back-forward cache on a shared machine, could otherwise serve one
-   * principal's response to the next.
+   * Applied to every GET below that returns principal-identifying data. These
+   * are the first cacheable responses in the toolkit that carry personal data
+   * - every pre-existing PII route is POST or PUT, and neither is cacheable by
+   * default. GET /consent in particular returns name, email, phone, dob, PAN
+   * and address on a URL with no user-identifying component, distinguished
+   * only by the host's session cookie: a shared cache or CDN in front of the
+   * host, or a browser's disk or back-forward cache on a shared machine, could
+   * otherwise serve one principal's response to the next. GET /consent/trail
+   * is worse still: it is the whole lineage of one person on the same
+   * undistinguished URL.
+   *
+   * The number of routes is deliberately not stated. It said "six" while the
+   * code had seven, and a count in a comment drifts every time a read route is
+   * added.
    */
   function noStore(req, res, next) {
     res.set("Cache-Control", "no-store");
@@ -485,6 +491,49 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
     noStore,
     wrap(async (req, res) => {
       const result = await getConsentState({ models, principalId: req.principalId });
+      res.status(200).json(result);
+    })
+  );
+
+  /**
+   * The Section 11 lineage view, and the headline of the audit-trail feature.
+   * Merges what the toolkit recorded about this principal with the events it
+   * can derive from the primary collections, newest first. Scoped to
+   * req.principalId only, so this can never read another principal's trail.
+   *
+   * includeOperatorRefs: false withholds actor.ref and caseRef. This read
+   * deliberately DOES include the back-office access rows, so a data principal
+   * can see that their record was looked at - but who looked is the adopter's
+   * own employee's personal data, retained under the adopter's employment
+   * basis, and the ticket reference is the adopter's internal case data.
+   * Neither is the data principal's to receive.
+   *
+   * The read itself is not recorded. Logging a principal's own access would
+   * make the right of access a write path and change its cost profile.
+   *
+   * ?limit= is optional and validated with the same assertLimit getConsentTrail
+   * uses internally, reused rather than duplicated. operator_lookup and
+   * operator_trail_read rows are filed under the SUBJECT's principalId, so a
+   * principal's stored entries scale with back-office activity as well as
+   * their own acts - the one input the partition rule does not bound - which
+   * is why this route needs a caller-supplied limit at all. A query string
+   * arrives as text, so it is coerced to a Number before assertLimit's own
+   * integer/range check runs; a hostile shape such as ?limit[$ne]=1 coerces to
+   * NaN and is refused the same way a non-integer value is, before it ever
+   * reaches getConsentTrail.
+   */
+  router.get(
+    "/consent/trail",
+    requireAuth,
+    noStore,
+    wrap(async (req, res) => {
+      const limit = req.query.limit === undefined ? undefined : assertLimit(Number(req.query.limit));
+      const result = await getConsentTrail({
+        models,
+        principalId: req.principalId,
+        limit,
+        includeOperatorRefs: false,
+      });
       res.status(200).json(result);
     })
   );
