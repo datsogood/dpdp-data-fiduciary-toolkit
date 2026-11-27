@@ -675,3 +675,49 @@ test("the contact-mismatch refusal records the channel the data principal was ac
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// The withdrawal route passes the session principal as the actor
+//
+// The branch under test saves nothing: withdrawConsent skips save() when
+// nothing changed. The trail row is the whole record, so an `unattributed` one
+// is a record of nobody having done nothing.
+// ---------------------------------------------------------------------------
+
+test("a withdrawal refused through the ROUTE is attributed to the data principal and to the surface they used", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    const { call, close } = await app(conn, { resolvePrincipal: () => principalId });
+    try {
+      // kyc_reporting rests on Section 7(d), not on consent, so the service
+      // refuses it and skips the ledger write entirely. Accept: text/html so
+      // the channel asserted below is one the request actually negotiated -
+      // a hardcoded actor could not produce it.
+      const res = await call(
+        "PUT",
+        "/consent/withdraw",
+        { consentTypes: ["kyc_reporting"] },
+        { Accept: "text/html" }
+      );
+      assert.equal(res.status, 200, "a purpose that cannot be withdrawn is reported in the receipt, not as an error status");
+    } finally {
+      await close();
+    }
+
+    const rows = await models.TrailEntry.find({ kind: "withdrawal_not_applied" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].reasonCode, "not_withdrawable");
+    assert.equal(rows[0].principalId, principalId);
+    assert.equal(
+      rows[0].actor.role, "principal",
+      "the request carried a session, so `unattributed` here means the route never passed the actor the service was given a parameter for"
+    );
+    assert.equal(
+      rows[0].actor.channel, "html",
+      "html, not library - the channel is negotiated per request, so this can only pass if principalActor(req) reached the service"
+    );
+  });
+});

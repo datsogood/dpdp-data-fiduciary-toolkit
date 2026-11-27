@@ -2,6 +2,7 @@ const { getCatalogEntry, getValidConsentTypes, getWithdrawableTypes, contactBloc
 const { assertPrincipalId, assertStringArray } = require("../utils/validate");
 const { generateDocRef } = require("../utils/principalId");
 const { AppError } = require("../utils/errors");
+const { recordTrail, UNATTRIBUTED } = require("./consentTrail");
 
 /**
  * Withdraws consent for one or more purposes. Append-only: never edits or
@@ -18,10 +19,16 @@ const { AppError } = require("../utils/errors");
  * @param {string}   input.principalId
  * @param {string[]} input.consentTypes   - purposes to withdraw
  * @param {Function} [input.onWithdrawal] - called once, only if something changed
+ * @param {object}   [input.actor]        - who is acting, for the audit trail.
+ *                                          Defaults to UNATTRIBUTED: a direct
+ *                                          library call genuinely has no
+ *                                          identity, and claiming "system"
+ *                                          would be a claim this library
+ *                                          cannot back.
  * @returns {Promise<{ docRef, receiptId, withdrawn, rejected, noChange, effectiveFrom, contact: { dpoName, dpoEmail } }>}
  *          effectiveFrom is null when withdrawn is empty.
  */
-async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal } = {}) {
+async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal, actor = UNATTRIBUTED } = {}) {
   assertPrincipalId(principalId);
   // Deduplicated: a purpose named twice in one request is one decision, and
   // without this the second pass would read the same pre-loop state and append
@@ -38,12 +45,19 @@ async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal
   const withdrawn = [];
   const rejected = [];
   const noChange = [];
+  // Collected per REASON, not per purpose. One call naming 200 purposes must
+  // write one row per reason and not 200 rows - an authenticated principal
+  // could otherwise force thousands of inserts from one request.
+  const unknownTypes = [];
+  const notWithdrawableTypes = [];
+  const notGrantedTypes = [];
 
   for (const type of types) {
     // Unknown first: an unknown type has no catalog entry, so every branch
     // below that reads one must be unreachable for it.
     if (!getValidConsentTypes().includes(type)) {
       rejected.push({ type, reason: "Unknown consent type" });
+      unknownTypes.push(type);
       continue;
     }
     const entry = getCatalogEntry(type);
@@ -52,12 +66,14 @@ async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal
         type,
         reason: `This purpose rests on ${entry.lawfulBasis.clause} (${entry.lawfulBasis.description}), not on your consent, so it cannot be withdrawn`,
       });
+      notWithdrawableTypes.push(type);
       continue;
     }
     const current = state[type] ? state[type].status : undefined;
     if (current !== "granted") {
       // Already withdrawn, declined, or never granted - nothing to revoke.
       noChange.push(type);
+      notGrantedTypes.push(type);
       continue;
     }
     record.events.push({
@@ -78,6 +94,39 @@ async function withdrawConsent({ models, principalId, consentTypes, onWithdrawal
     if (typeof onWithdrawal === "function") {
       await onWithdrawal({ principalId, types: withdrawn, effectiveFrom: now, receiptId });
     }
+  }
+
+  // The trail write happens whether or not the save above ran - that is the
+  // whole point. A refused or no-op withdrawal skips save() entirely, so these
+  // rows are the only record anywhere that the person asked and was told no.
+  //
+  // AFTER the save, never before: a row must not claim a decision the ledger
+  // write then failed to make. What did succeed is in the ledger with a real
+  // timestamp and is derived at read time, so it is not repeated here.
+  //
+  // recordTrail is fail-open and never throws, so an unavailable trail cannot
+  // turn a withdrawal into a 500.
+  for (const group of [
+    { types: unknownTypes, outcome: "refused", reasonCode: "unknown_consent_type" },
+    { types: notWithdrawableTypes, outcome: "refused", reasonCode: "not_withdrawable" },
+    { types: notGrantedTypes, outcome: "no_change", reasonCode: "not_granted" },
+  ]) {
+    if (!group.types.length) continue;
+    await recordTrail(models, {
+      principalId,
+      kind: "withdrawal_not_applied",
+      outcome: group.outcome,
+      reasonCode: group.reasonCode,
+      actor,
+      receiptId,
+      // recordTrail drops every element that is not in the live catalog, so
+      // the unknown-type row keeps its count and loses its strings. An unknown
+      // type is caller-supplied text that assertStringArray does not
+      // content-check, so an email typed into consentTypes must never reach a
+      // collection that survives erasure.
+      consentTypes: group.types,
+      count: group.types.length,
+    });
   }
 
   return {

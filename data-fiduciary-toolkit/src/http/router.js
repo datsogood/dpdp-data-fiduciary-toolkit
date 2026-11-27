@@ -436,6 +436,11 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
       principalId: req.principalId,
       consentTypes: asArray(req.body.consentTypes),
       onWithdrawal,
+      // The service defaults to UNATTRIBUTED, which is the honest answer for a
+      // direct library call and the wrong one here: this request arrived with a
+      // session, on a surface we can name. Same helper as every other
+      // principal-facing site in this file.
+      actor: principalActor(req),
     });
     // Same reasoning as the consent receipt above: withdrawal must be as easy
     // as granting, so a browser gets a page, not a JSON blob, and the same
