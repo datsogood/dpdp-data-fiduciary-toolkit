@@ -531,3 +531,66 @@ test("slaDueAt is on the rights-request read path - a principal must be able to 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// src/http/shared.js - the three pieces both routers need
+//
+// The origin check is a security control, and a security control duplicated
+// across two routers drifts. These assertions pin the extracted contract; the
+// seven origin tests above pin the behaviour end to end through a real server.
+// ---------------------------------------------------------------------------
+
+test("shared.js exports wrap, errorMapper and makeCheckOrigin, and errorMapper keeps Express's four-argument arity", () => {
+  const { wrap, errorMapper, makeCheckOrigin } = require("../src/http/shared");
+
+  assert.equal(typeof wrap, "function");
+  assert.equal(typeof errorMapper, "function");
+  assert.equal(typeof makeCheckOrigin, "function");
+  assert.equal(
+    errorMapper.length, 4,
+    "Express decides a function is an error handler by its arity alone - a three-parameter mapper is registered as ordinary middleware, never runs, and every fault falls through to Express's default HTML 500 with no warning of any kind"
+  );
+  assert.equal(makeCheckOrigin([]).length, 3, "the built middleware takes (req, res, next)");
+});
+
+test("makeCheckOrigin closes over the origins it was built with, and lets GET through", () => {
+  const { makeCheckOrigin } = require("../src/http/shared");
+
+  // Minimal Express stand-ins. checkOrigin reads only req.method, req.get and
+  // res.status().json(), so a real server is not needed to pin the branches.
+  const req = (method, origin, host = "app.example") => {
+    const headers = { host };
+    if (origin !== undefined) headers.origin = origin;
+    return { method, get: (name) => headers[name.toLowerCase()] };
+  };
+  const run = (mw, r) => {
+    const out = {};
+    const res = {
+      status(code) { out.status = code; return this; },
+      json(body) { out.body = body; return this; },
+    };
+    mw(r, res, () => { out.nexted = true; });
+    return out;
+  };
+
+  const mw = makeCheckOrigin(["https://portal.example"]);
+
+  assert.equal(run(mw, req("GET", "https://evil.example")).nexted, true, "GET is exempt - it changes no state");
+  assert.equal(run(mw, req("POST", undefined)).nexted, true, "curl sends no Origin and no Referer, and is not the threat");
+  assert.equal(run(mw, req("POST", "https://app.example")).nexted, true, "the request's own host is always allowed");
+  assert.equal(run(mw, req("POST", "https://portal.example")).nexted, true, "a configured origin is a union with the own host, never a replacement");
+
+  const refused = run(mw, req("POST", "https://evil.example"));
+  assert.equal(refused.status, 403);
+  assert.deepEqual(refused.body, { error: "cross-origin request refused" });
+
+  const unparseable = run(mw, req("POST", "null"));
+  assert.equal(unparseable.status, 403, "the literal string null is evidence of a cross-origin or sandboxed context");
+  assert.deepEqual(unparseable.body, { error: "bad origin" });
+
+  const other = makeCheckOrigin([]);
+  assert.equal(
+    run(other, req("POST", "https://portal.example")).status, 403,
+    "each built middleware carries its own allowlist - a second router must not inherit the first's"
+  );
+});
