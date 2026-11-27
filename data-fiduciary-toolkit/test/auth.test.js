@@ -677,10 +677,11 @@ test("the contact-mismatch refusal records the channel the data principal was ac
 });
 
 // ---------------------------------------------------------------------------
-// The withdrawal route passes the session principal as the actor
+// Withdrawal and escalation routes pass the session principal as the actor
 //
-// The branch under test saves nothing: withdrawConsent skips save() when
-// nothing changed. The trail row is the whole record, so an `unattributed` one
+// Both branches under test save nothing: withdrawConsent skips save() when
+// nothing changed, and escalateToBoard's SLA guard throws before it touches
+// the grievance. The trail row is the whole record, so an `unattributed` one
 // is a record of nobody having done nothing.
 // ---------------------------------------------------------------------------
 
@@ -719,5 +720,41 @@ test("a withdrawal refused through the ROUTE is attributed to the data principal
       rows[0].actor.channel, "html",
       "html, not library - the channel is negotiated per request, so this can only pass if principalActor(req) reached the service"
     );
+  });
+});
+
+test("an escalation refused through the ROUTE names the person who was stopped from reaching the Board", async () => {
+  await withDb(async (conn) => {
+    const models = buildModels(conn);
+    const persistPIIwithconsent = require("../src/services/persistPIIwithconsent");
+    const { principalId } = await persistPIIwithconsent({ models, pii: PII, consentTypes: ["marketing"] });
+
+    const { call, close } = await app(conn, { resolvePrincipal: () => principalId });
+    try {
+      const filed = await call("POST", "/grievance", {
+        subject: "No answer",
+        description: "I asked twice and heard nothing.",
+      });
+      assert.equal(filed.status, 201);
+      const { refId } = await filed.json();
+
+      // Filed a moment ago, so the Grievance Officer's SLA has not lapsed and
+      // escalateToBoard refuses. That branch saves nothing at all - the 409
+      // and this row are its entire output.
+      const res = await call("POST", `/grievance/${refId}/escalate`, {});
+      assert.equal(res.status, 409, "setup check - the SLA guard must actually have refused");
+    } finally {
+      await close();
+    }
+
+    const rows = await models.TrailEntry.find({ kind: "escalation_refused" }).lean();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].reasonCode, "sla_not_lapsed");
+    assert.equal(rows[0].principalId, principalId);
+    assert.equal(
+      rows[0].actor.role, "principal",
+      "a data principal was turned back from the Board - a row saying `unattributed` answers nobody's question about who was turned back"
+    );
+    assert.equal(rows[0].actor.channel, "api");
   });
 });

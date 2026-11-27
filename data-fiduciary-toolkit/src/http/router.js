@@ -593,6 +593,7 @@ function createRouter({ db, resolvePrincipal, onWithdrawal, onGrievanceFiled, al
         models,
         refId: req.params.refId,
         principalId: req.principalId,
+        actor: principalActor(req),
       });
       res.status(200).json(result);
     })
