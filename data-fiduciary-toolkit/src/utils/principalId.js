@@ -183,8 +183,27 @@ async function findPrincipalByContact({ models, email, phone }) {
  * orphaning the consent history, and it is deliberately separate from signup:
  * inferring "same person" from a shared phone number would merge two members of
  * a household who share a handset.
+ *
+ * @param {object} input
+ * @param {object} input.models
+ * @param {string} input.principalId
+ * @param {object} input.pii
+ * @param {object} [input.actor] - who is acting, for the audit trail. Defaults
+ *                                 to UNATTRIBUTED, which is not a synonym for
+ *                                 "system": it means the library genuinely does
+ *                                 not know.
  */
-async function updatePrincipalContact({ models, principalId, pii }) {
+async function updatePrincipalContact({ models, principalId, pii, actor }) {
+  // Required lazily, INSIDE the function, on purpose: services/consentTrail.js
+  // requires THIS module for findConsentTrailByContact, so a top-level require
+  // here would be circular and would leave whichever of the two loaded second
+  // destructuring a half-built exports object. config/catalog.js requires
+  // config/notice.js the same way and for the same reason. It is also why the
+  // default sits here rather than in the parameter list - UNATTRIBUTED is not
+  // in scope until this line has run.
+  const { recordTrail, UNATTRIBUTED } = require("../services/consentTrail");
+  const who = actor || UNATTRIBUTED;
+
   assertPrincipalId(principalId);
   if (!pii || typeof pii !== "object") throw new AppError("pii is required", 400);
 
@@ -201,15 +220,38 @@ async function updatePrincipalContact({ models, principalId, pii }) {
   // onto an erased record, leaving a document that claims erasedAt while
   // holding live PII. That is the worst possible artefact to hand a regulator.
   if (principal.erasedAt) {
+    // Recorded, then refused. This branch saves nothing and the 409 is its
+    // only other output, so without this row an attempt to write PII back onto
+    // an erased record leaves no trace at all. Never the value that was
+    // refused: it is exactly the personal data the erasure destroyed.
+    await recordTrail(models, {
+      principalId,
+      kind: "consent_refused",
+      outcome: "refused",
+      reasonCode: "record_erased",
+      actor: who,
+    });
     throw new AppError("This data principal's record has been erased and cannot be updated", 409);
   }
+
+  // Which CONTACT fields actually move. Field names only - never a value and
+  // never a hash of one. The old emailHash is what this write destroys, so
+  // copying it into a collection that survives erasure would rebuild the
+  // email-to-person index erasure exists to destroy.
+  const changed = [];
 
   // Email uniqueness only. phoneHash is deliberately non-unique because a
   // household shares a handset, so a phone clash is NOT an error - and checking
   // it would 409 a beneficiary merely for resubmitting their own unchanged
   // phone number, locking the stated audience out of the Section 12 correction
   // right entirely.
-  if (pii.phone) principal.phoneHash = lookupHash(pii.phone);
+  if (pii.phone) {
+    const phoneHash = lookupHash(pii.phone);
+    // Resubmitting the same number overwrites the hash with itself and destroys
+    // nothing, so it is not a correction and is not recorded as one.
+    if (principal.phoneHash !== phoneHash) changed.push("phone");
+    principal.phoneHash = phoneHash;
+  }
 
   if (pii.email) {
     const hash = lookupHash(pii.email);
@@ -230,6 +272,7 @@ async function updatePrincipalContact({ models, principalId, pii }) {
         throw new AppError("That email is already registered to another data principal", 409);
       }
       principal.emailHash = hash;
+      changed.push("email");
     }
   }
 
@@ -245,6 +288,25 @@ async function updatePrincipalContact({ models, principalId, pii }) {
       throw new AppError("That email is already registered to another data principal", 409);
     }
     throw err;
+  }
+
+  // After the save, and only when a contact hash actually moved. A name-only
+  // correction is not recorded here: this kind exists because the OLD HASH is
+  // overwritten and destroyed, and a name change destroys nothing the trail is
+  // charged with keeping.
+  if (changed.length) {
+    await recordTrail(models, {
+      principalId,
+      kind: "contact_corrected",
+      outcome: "recorded",
+      actor: who,
+      // The marker, built from a fixed vocabulary in a fixed order so that it
+      // is enum-ish rather than caller-shaped: "email", "phone" or
+      // "email+phone". It says WHICH detail was corrected and nothing whatever
+      // about its value.
+      toStatus: ["email", "phone"].filter((f) => changed.includes(f)).join("+"),
+      count: changed.length,
+    });
   }
   return principal;
 }
